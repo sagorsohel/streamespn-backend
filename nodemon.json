@@ -1,0 +1,6 @@
+{
+  "watch": ["src", ".env"],
+  "ext": "js,json",
+  "ignore": ["node_modules", "drizzle", "*.test.js"],
+  "exec": "node src/server.js"
+}

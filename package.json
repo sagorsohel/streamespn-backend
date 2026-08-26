@@ -33,6 +33,6 @@
   },
   "devDependencies": {
     "drizzle-kit": "^0.20.17",
-    "nodemon": "^3.1.0"
+    "nodemon": "^3.1.14"
   }
 }
