@@ -1,4 +1,4 @@
-const { mysqlTable, serial, varchar, text, integer, boolean, timestamp, mysqlEnum } = require('drizzle-orm/mysql-core');
+const { mysqlTable, serial, varchar, text, int, boolean, timestamp, mysqlEnum } = require('drizzle-orm/mysql-core');
 
 const users = mysqlTable('users', {
   id: serial('id').primaryKey(),
@@ -20,7 +20,7 @@ const sportsCategories = mysqlTable('sports_categories', {
   playerImage: text('player_image'),
   bgImage: text('bg_image'),
   referralLink: text('referral_link'),
-  displayOrder: integer('display_order').default(0).notNull(),
+  displayOrder: int('display_order').default(0).notNull(),
   isCustomized: boolean('is_customized').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
