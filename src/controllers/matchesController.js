@@ -145,7 +145,7 @@ const getMatches = async (req, res, next) => {
     const pageNum = page ? (Number(page) || 1) : 1;
     const offset = limitNum ? (pageNum - 1) * limitNum : 0;
 
-    query = query.orderBy(asc(matches.matchTime));
+    query = query.orderBy(statusOrder, asc(matches.matchTime));
 
     if (limitNum) {
       query = query.limit(limitNum).offset(offset);
