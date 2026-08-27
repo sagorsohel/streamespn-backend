@@ -2,6 +2,7 @@ const express = require('express');
 const {
   getMatches,
   getMatchById,
+  getLiveScores,
   createMatch,
   updateMatch,
   deleteMatch,
@@ -13,6 +14,7 @@ const { verifyToken } = require('../middleware/auth');
 const router = express.Router();
 
 router.get('/', getMatches);
+router.get('/live-scores', getLiveScores);
 router.get('/:id', getMatchById);
 router.post('/', verifyToken, createMatch);
 router.post('/sync', verifyToken, syncMatches);

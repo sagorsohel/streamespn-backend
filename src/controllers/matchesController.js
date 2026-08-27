@@ -50,9 +50,15 @@ const ensureTableExists = async () => {
 
   try {
     await connection.query(`ALTER TABLE \`matches\` ADD COLUMN \`slug\` VARCHAR(255);`);
-  } catch (e) {
-    // Column already exists
-  }
+  } catch (e) {}
+
+  try {
+    await connection.query(`ALTER TABLE \`matches\` ADD COLUMN \`live_minute\` VARCHAR(50);`);
+  } catch (e) {}
+
+  try {
+    await connection.query(`ALTER TABLE \`matches\` ADD COLUMN \`live_period\` VARCHAR(50);`);
+  } catch (e) {}
 
   // AUTO-ACTIVATE: Turn ON status (status = 1) for all subcategories that have matches assigned!
   try {
@@ -100,6 +106,8 @@ const getMatches = async (req, res, next) => {
         awayTeamLogo: matches.awayTeamLogo,
         homeScore: matches.homeScore,
         awayScore: matches.awayScore,
+        livePeriod: matches.livePeriod,
+        liveMinute: matches.liveMinute,
         matchTime: matches.matchTime,
         status: matches.status,
         venue: matches.venue,
@@ -124,10 +132,10 @@ const getMatches = async (req, res, next) => {
     if (status && ['upcoming', 'live', 'finished'].includes(status)) {
       conditions.push(eq(matches.status, status));
     }
-    if (categoryId) {
+    if (categoryId && categoryId !== 'all') {
       conditions.push(eq(matches.categoryId, Number(categoryId)));
     }
-    if (subcategoryId) {
+    if (subcategoryId && subcategoryId !== 'all') {
       conditions.push(eq(matches.subcategoryId, Number(subcategoryId)));
     }
 
@@ -165,6 +173,100 @@ const getMatches = async (req, res, next) => {
   }
 };
 
+let lastLiveSyncTime = 0;
+
+const syncLiveScoresWithSportsDB = async () => {
+  const now = Date.now();
+  if (now - lastLiveSyncTime < 20000) return;
+  lastLiveSyncTime = now;
+
+  try {
+    const res = await fetch('https://www.thesportsdb.com/api/v1/json/3/livescore.php');
+    const data = await res.json();
+    if (!data.livescore || !Array.isArray(data.livescore)) return;
+
+    for (const item of data.livescore) {
+      if (!item.strHomeTeam || !item.strAwayTeam) continue;
+
+      const statusStr = (item.strStatus || '').toLowerCase().trim();
+      let targetStatus = 'upcoming';
+      if (statusStr === 'ft' || statusStr === 'finished' || statusStr === 'aet') {
+        targetStatus = 'finished';
+      } else if (
+        statusStr.includes('1h') ||
+        statusStr.includes('2h') ||
+        statusStr.includes('ht') ||
+        statusStr.includes('live') ||
+        statusStr.includes('in play') ||
+        statusStr.includes('q1') ||
+        statusStr.includes('q2') ||
+        statusStr.includes('q3') ||
+        statusStr.includes('q4')
+      ) {
+        targetStatus = 'live';
+      } else if (statusStr === 'ns' || statusStr === 'not started' || statusStr.includes('sched')) {
+        targetStatus = 'upcoming';
+      }
+
+      const homeScoreVal = item.intHomeScore !== null && item.intHomeScore !== undefined ? String(item.intHomeScore) : null;
+      const awayScoreVal = item.intAwayScore !== null && item.intAwayScore !== undefined ? String(item.intAwayScore) : null;
+
+      try {
+        await db
+          .update(matches)
+          .set({
+            homeScore: homeScoreVal,
+            awayScore: awayScoreVal,
+            livePeriod: item.strStatus || null,
+            liveMinute: item.strProgress || null,
+            status: targetStatus,
+          })
+          .where(
+            and(
+              eq(matches.isCustomized, false),
+              or(
+                eq(matches.sportsdbEventId, item.idEvent),
+                and(
+                  sql`LOWER(${matches.homeTeam}) LIKE ${'%' + item.strHomeTeam.toLowerCase() + '%'}`,
+                  sql`LOWER(${matches.awayTeam}) LIKE ${'%' + item.strAwayTeam.toLowerCase() + '%'}`
+                )
+              )
+            )
+          );
+      } catch (e) {}
+    }
+  } catch (err) {
+    // silent catch
+  }
+};
+
+// Get Live Scores, Period & Live Minute Only (Lightweight Polling Endpoint for Real-Time Live Sync)
+const getLiveScores = async (req, res, next) => {
+  try {
+    // Auto-sync with SportsDB live score feed (throttled 20s)
+    await syncLiveScoresWithSportsDB();
+
+    const liveMatches = await db
+      .select({
+        id: matches.id,
+        homeScore: matches.homeScore,
+        awayScore: matches.awayScore,
+        livePeriod: matches.livePeriod,
+        liveMinute: matches.liveMinute,
+        status: matches.status,
+      })
+      .from(matches)
+      .where(eq(matches.status, 'live'));
+
+    return res.status(200).json({
+      success: true,
+      data: liveMatches,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Get Single Match by ID or Slug
 const getMatchById = async (req, res, next) => {
   try {
@@ -187,6 +289,8 @@ const getMatchById = async (req, res, next) => {
         awayTeamLogo: matches.awayTeamLogo,
         homeScore: matches.homeScore,
         awayScore: matches.awayScore,
+        livePeriod: matches.livePeriod,
+        liveMinute: matches.liveMinute,
         matchTime: matches.matchTime,
         status: matches.status,
         venue: matches.venue,
@@ -282,6 +386,8 @@ const createMatch = async (req, res, next) => {
       awayTeamLogo: awayTeamLogo || null,
       homeScore: homeScore !== undefined ? String(homeScore) : null,
       awayScore: awayScore !== undefined ? String(awayScore) : null,
+      livePeriod: req.body.livePeriod !== undefined ? (req.body.livePeriod ? String(req.body.livePeriod) : null) : null,
+      liveMinute: req.body.liveMinute !== undefined ? (req.body.liveMinute ? String(req.body.liveMinute) : null) : null,
       matchTime: matchTime ? new Date(matchTime) : new Date(),
       status: status || 'upcoming',
       venue: venue ? venue.trim() : null,
@@ -401,6 +507,8 @@ const updateMatch = async (req, res, next) => {
         awayTeamLogo: awayTeamLogo !== undefined ? awayTeamLogo : existing[0].awayTeamLogo,
         homeScore: homeScore !== undefined ? (homeScore !== null ? String(homeScore) : null) : existing[0].homeScore,
         awayScore: awayScore !== undefined ? (awayScore !== null ? String(awayScore) : null) : existing[0].awayScore,
+        livePeriod: req.body.livePeriod !== undefined ? (req.body.livePeriod ? String(req.body.livePeriod) : null) : existing[0].livePeriod,
+        liveMinute: req.body.liveMinute !== undefined ? (req.body.liveMinute ? String(req.body.liveMinute) : null) : existing[0].liveMinute,
         matchTime: matchTime !== undefined ? (matchTime ? new Date(matchTime) : null) : existing[0].matchTime,
         status: status !== undefined ? status : existing[0].status,
         venue: venue !== undefined ? venue : existing[0].venue,
@@ -583,28 +691,48 @@ const syncMatches = async (req, res, next) => {
         ? slugify(`${homeTeam}-vs-${awayTeam}-${eventDateStr}`)
         : slugify(`${eventName}-${eventDateStr}`);
 
-      // Determine status
+      // Determine match time strictly in UTC
+      let matchTimeVal = new Date();
+      if (ev.strTimestamp) {
+        const ts = ev.strTimestamp.endsWith('Z') || ev.strTimestamp.includes('+') ? ev.strTimestamp : `${ev.strTimestamp}Z`;
+        matchTimeVal = new Date(ts);
+      } else if (ev.dateEvent) {
+        const timePart = ev.strTime || '00:00:00';
+        matchTimeVal = new Date(`${ev.dateEvent}T${timePart}Z`);
+      }
+
+      const now = new Date();
+
+      // Determine status strictly based on real match status & time
       let status = 'upcoming';
-      const statusStr = (ev.strStatus || '').toLowerCase();
-      const dateEvStr = ev.dateEvent || today;
+      const statusStr = (ev.strStatus || '').toLowerCase().trim();
 
       if (
         statusStr.includes('finished') ||
         statusStr.includes('ft') ||
-        dateEvStr < today ||
-        (ev.intHomeScore !== null && ev.intHomeScore !== undefined && ev.intHomeScore !== '')
+        statusStr.includes('aet')
       ) {
         status = 'finished';
       } else if (
         statusStr.includes('live') ||
         statusStr.includes('in play') ||
+        statusStr.includes('1h') ||
+        statusStr.includes('2h') ||
         statusStr.includes('1st') ||
         statusStr.includes('2nd') ||
         statusStr.includes('ht') ||
-        dateEvStr === today
+        statusStr.includes('q1') ||
+        statusStr.includes('q2') ||
+        statusStr.includes('q3') ||
+        statusStr.includes('q4')
       ) {
-        status = dateEvStr === today && (ev.intHomeScore !== null || statusStr) ? 'live' : 'upcoming';
-        if (dateEvStr < today) status = 'finished';
+        status = 'live';
+      } else if (matchTimeVal > now) {
+        status = 'upcoming';
+      } else if (matchTimeVal < new Date(now.getTime() - 4 * 3600 * 1000) && ev.intHomeScore !== null) {
+        status = 'finished';
+      } else {
+        status = 'upcoming';
       }
 
       // Check if match already exists in DB
@@ -622,8 +750,11 @@ const syncMatches = async (req, res, next) => {
           .update(matches)
           .set({
             slug: existingMatch.slug || generatedSlug,
+            matchTime: matchTimeVal,
             homeScore: ev.intHomeScore !== null && ev.intHomeScore !== undefined ? String(ev.intHomeScore) : existingMatch.homeScore,
             awayScore: ev.intAwayScore !== null && ev.intAwayScore !== undefined ? String(ev.intAwayScore) : existingMatch.awayScore,
+            livePeriod: ev.strStatus || existingMatch.livePeriod,
+            liveMinute: ev.strProgress || existingMatch.liveMinute,
             homeTeamLogo: ev.strHomeTeamBadge || existingMatch.homeTeamLogo,
             awayTeamLogo: ev.strAwayTeamBadge || existingMatch.awayTeamLogo,
             status: status,
@@ -636,13 +767,6 @@ const syncMatches = async (req, res, next) => {
       } else {
         // Insert new match
         maxOrder++;
-        let matchTimeVal = new Date();
-        if (ev.strTimestamp) {
-          matchTimeVal = new Date(ev.strTimestamp);
-        } else if (ev.dateEvent) {
-          const timePart = ev.strTime || '00:00:00';
-          matchTimeVal = new Date(`${ev.dateEvent}T${timePart}`);
-        }
 
         await db.insert(matches).values({
           sportsdbEventId: eventId,
@@ -657,6 +781,8 @@ const syncMatches = async (req, res, next) => {
           awayTeamLogo: ev.strAwayTeamBadge || null,
           homeScore: ev.intHomeScore !== null && ev.intHomeScore !== undefined ? String(ev.intHomeScore) : null,
           awayScore: ev.intAwayScore !== null && ev.intAwayScore !== undefined ? String(ev.intAwayScore) : null,
+          livePeriod: ev.strStatus || null,
+          liveMinute: ev.strProgress || null,
           matchTime: matchTimeVal,
           status: status,
           venue: ev.strVenue || null,
@@ -700,6 +826,7 @@ const syncMatches = async (req, res, next) => {
 module.exports = {
   getMatches,
   getMatchById,
+  getLiveScores,
   createMatch,
   updateMatch,
   deleteMatch,

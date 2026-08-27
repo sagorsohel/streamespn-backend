@@ -53,6 +53,8 @@ const matches = mysqlTable('matches', {
   awayTeamLogo: text('away_team_logo'),
   homeScore: varchar('home_score', { length: 50 }),
   awayScore: varchar('away_score', { length: 50 }),
+  livePeriod: varchar('live_period', { length: 50 }),
+  liveMinute: varchar('live_minute', { length: 50 }),
   matchTime: timestamp('match_time'),
   status: mysqlEnum('status', ['upcoming', 'live', 'finished']).default('upcoming').notNull(),
   venue: varchar('venue', { length: 255 }),

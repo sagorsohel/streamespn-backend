@@ -71,13 +71,91 @@ Fetch upcoming and past matches.
 ### 2.5 Real-Time Livescores (`livescore`)
 Real-time score updates for live matches.
 
-| Feature | Endpoint (v2) | Description |
+| Feature | Endpoint (v2 / v1) | Description |
 | :--- | :--- | :--- |
-| **All Livescores** | `GET /api/v2/json/livescore/all` | Real-time live scores for all ongoing matches worldwide. |
-| **Livescore by Sport** | `GET /api/v2/json/livescore/{sport}` | Filter live scores by sport (e.g. `/livescore/soccer`, `/livescore/cricket`). |
-| **Livescore by League** | `GET /api/v2/json/livescore/{idLeague}` | Filter live scores by league ID. |
+| **All Livescores** | `GET /api/v2/json/livescore/all`<br>`GET /api/v1/json/3/livescore.php` | Real-time live scores for all ongoing matches worldwide. |
+| **Livescore Soccer** | `GET /api/v2/json/livescore/soccer`<br>`GET /api/v1/json/3/livescore.php?s=Soccer` | Filter real-time live scores for soccer matches. |
+| **Livescore by League** | `GET /api/v2/json/livescore/{idLeague}`<br>`GET /api/v1/json/3/livescore.php?l={idLeague}` | Filter live scores by league ID. |
 
-### 2.6 TV Schedule Filtering (`filter`)
+#### ⚽ 2.5.1 SportsDB LiveScore Soccer Field Schema (`livescore.php?s=Soccer`)
+
+The table below documents all JSON fields returned by TheSportsDB LiveScore API:
+
+| Field Name | Data Type | Description & Example Values |
+| :--- | :--- | :--- |
+| `idLiveScore` | `string` | Unique LiveScore Record ID (e.g., `"16291784"`) |
+| `idEvent` | `string` | SportsDB Event ID matching schedule API (e.g., `"2585513"`) |
+| `strSport` | `string` | Sport category (e.g., `"Soccer"`, `"Basketball"`) |
+| `idLeague` | `string` | SportsDB League/Subcategory ID (e.g., `"5526"`) |
+| `strLeague` | `string` | League / Subcategory Name (e.g., `"Copa AUF Uruguay"`) |
+| `intDivision` | `string` | Division number (e.g., `"1"`, `"3"`, `"99"`) |
+| `idHomeTeam` | `string` | Home Team ID (e.g., `"135369"`) |
+| `idAwayTeam` | `string` | Away Team ID (e.g., `"138818"`) |
+| `strHomeTeam` | `string` | Home Team Name (e.g., `"Peñarol"`) |
+| `strAwayTeam` | `string` | Away Team Name (e.g., `"Montevideo City Torque"`) |
+| `strHomeTeamBadge` | `string` | Home Team Logo Badge Image URL |
+| `strAwayTeamBadge` | `string` | Away Team Logo Badge Image URL |
+| `intHomeScore` | `string` | Current Home Team Score (e.g., `"1"`, `"3"`) |
+| `intAwayScore` | `string` | Current Away Team Score (e.g., `"0"`, `"2"`) |
+| `strStatus` | `string` | Match Status Period (`"1H"` = 1st Half, `"HT"` = Half Time, `"2H"` = 2nd Half, `"FT"` = Full Time) |
+| `strProgress` | `string` | Match Elapsed Minute / Progress (e.g., `"45'"`, `"74'"`, `"77'"`, `"90+3"`, `"90+4"`) |
+| `strTimestamp` | `string` | UTC Match Start Timestamp (e.g., `"2026-08-26T23:15:00"`) |
+| `strEventTime` | `string` | UTC Event Time (e.g., `"23:15"`) |
+| `dateEvent` | `string` | UTC Event Date (e.g., `"2026-08-26"`) |
+| `updated` | `string` | Score Last Updated Timestamp (e.g., `"2026-08-27 01:52:32"`) |
+
+#### 📄 Sample Raw Response JSON:
+
+```json
+{
+  "livescore": [
+    {
+      "idLiveScore": "16291784",
+      "idEvent": "2585513",
+      "strSport": "Soccer",
+      "idLeague": "5526",
+      "strLeague": "Copa AUF Uruguay",
+      "intDivision": "99",
+      "idHomeTeam": "135369",
+      "idAwayTeam": "138818",
+      "strHomeTeam": "Peñarol",
+      "strAwayTeam": "Montevideo City Torque",
+      "strHomeTeamBadge": "https://r2.thesportsdb.com/images/media/team/badge/uuwpux1473541171.png",
+      "strAwayTeamBadge": "https://r2.thesportsdb.com/images/media/team/badge/v7urjn1580234584.png",
+      "intHomeScore": "1",
+      "intAwayScore": "0",
+      "strStatus": "2H",
+      "strProgress": "77",
+      "strTimestamp": "2026-08-26T23:15:00",
+      "strEventTime": "23:15",
+      "dateEvent": "2026-08-26",
+      "updated": "2026-08-27 01:52:32"
+    },
+    {
+      "idLiveScore": "16291179",
+      "idEvent": "2497989",
+      "strSport": "Soccer",
+      "idLeague": "5660",
+      "strLeague": "Copa Venezuela",
+      "intDivision": "99",
+      "idHomeTeam": "151955",
+      "idAwayTeam": "150578",
+      "strHomeTeam": "Deportivo Miranda",
+      "strAwayTeam": "Anzoátegui",
+      "strHomeTeamBadge": "https://r2.thesportsdb.com/images/media/team/badge/v994g21746251541.png",
+      "strAwayTeamBadge": "https://r2.thesportsdb.com/images/media/team/badge/n36vyr1737129376.png",
+      "intHomeScore": "1",
+      "intAwayScore": "2",
+      "strStatus": "2H",
+      "strProgress": "90+3",
+      "strTimestamp": "2026-08-26T23:00:00",
+      "strEventTime": "23:00",
+      "dateEvent": "2026-08-26",
+      "updated": "2026-08-27 01:52:32"
+    }
+  ]
+}
+```
 | Feature | Endpoint (v2) | Parameters |
 | :--- | :--- | :--- |
 | **TV Events by Date** | `GET /api/v2/json/filter/tv/day/{YYYY-MM-DD}` | E.g. `/filter/tv/day/2024-06-22` |
