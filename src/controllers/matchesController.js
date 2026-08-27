@@ -120,6 +120,7 @@ const getMatches = async (req, res, next) => {
         updatedAt: matches.updatedAt,
         categoryName: sportsCategories.sportName,
         categoryLogo: sportsCategories.iconUrl,
+        categoryReferralLink: sportsCategories.referralLink,
         subcategoryName: sportsSubcategories.name,
         subcategoryLogo: sportsSubcategories.logoUrl,
       })
@@ -305,6 +306,7 @@ const getMatchById = async (req, res, next) => {
         categoryLogo: sportsCategories.iconUrl,
         categoryPlayerImage: sportsCategories.playerImage,
         categoryThumbUrl: sportsCategories.thumbUrl,
+        categoryReferralLink: sportsCategories.referralLink,
         subcategoryName: sportsSubcategories.name,
         subcategoryLogo: sportsSubcategories.logoUrl,
       })
