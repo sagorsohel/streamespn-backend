@@ -277,7 +277,7 @@ const getMatchById = async (req, res, next) => {
     const { id } = req.params;
     const isNum = !isNaN(Number(id));
 
-    const found = await db
+    let found = await db
       .select({
         id: matches.id,
         sportsdbEventId: matches.sportsdbEventId,
@@ -317,6 +317,62 @@ const getMatchById = async (req, res, next) => {
       .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
       .where(isNum ? eq(matches.id, Number(id)) : eq(matches.slug, id))
       .limit(1);
+
+    // Fallback candidate search for URL-encoded, special character, or slugified variants
+    if (found.length === 0 && !isNum) {
+      const decoded = decodeURIComponent(id);
+      const slugifiedId = slugify(id);
+      const slugifiedDecoded = slugify(decoded);
+
+      const candidates = Array.from(new Set([decoded, slugifiedId, slugifiedDecoded])).filter(
+        (c) => c && c !== id
+      );
+
+      for (const cand of candidates) {
+        found = await db
+          .select({
+            id: matches.id,
+            sportsdbEventId: matches.sportsdbEventId,
+            categoryId: matches.categoryId,
+            subcategoryId: matches.subcategoryId,
+            matchType: matches.matchType,
+            slug: matches.slug,
+            title: matches.title,
+            homeTeam: matches.homeTeam,
+            homeTeamLogo: matches.homeTeamLogo,
+            awayTeam: matches.awayTeam,
+            awayTeamLogo: matches.awayTeamLogo,
+            homeScore: matches.homeScore,
+            awayScore: matches.awayScore,
+            livePeriod: matches.livePeriod,
+            liveMinute: matches.liveMinute,
+            matchTime: matches.matchTime,
+            status: matches.status,
+            venue: matches.venue,
+            playerImage: matches.playerImage,
+            bgImage: matches.bgImage,
+            referralLink: matches.referralLink,
+            displayOrder: matches.displayOrder,
+            isCustomized: matches.isCustomized,
+            createdAt: matches.createdAt,
+            updatedAt: matches.updatedAt,
+            categoryName: sportsCategories.sportName,
+            categoryLogo: sportsCategories.iconUrl,
+            categoryPlayerImage: sportsCategories.playerImage,
+            categoryThumbUrl: sportsCategories.thumbUrl,
+            categoryReferralLink: sportsCategories.referralLink,
+            subcategoryName: sportsSubcategories.name,
+            subcategoryLogo: sportsSubcategories.logoUrl,
+          })
+          .from(matches)
+          .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
+          .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
+          .where(eq(matches.slug, cand))
+          .limit(1);
+
+        if (found.length > 0) break;
+      }
+    }
 
     if (found.length === 0) {
       return res.status(404).json({
