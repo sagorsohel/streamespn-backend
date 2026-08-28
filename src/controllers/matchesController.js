@@ -1,4 +1,4 @@
-const { eq, ne, asc, desc, and, or, sql } = require('drizzle-orm');
+const { eq, ne, gte, lte, asc, desc, and, or, sql } = require('drizzle-orm');
 const axios = require('axios');
 const { db, pool, ensureDatabaseExists } = require('../db');
 const { matches, sportsCategories, sportsSubcategories } = require('../db/schema');
@@ -782,7 +782,18 @@ const syncMatchesCore = async () => {
       continue;
     }
 
-    // ⛔ 2. EXCLUDE EXISTING MATCHES (If already in DB by eventId or slug, DO NOT re-load)
+    // ⛔ 2. EXCLUDE MATCHES BEYOND TOMORROW (Do NOT load 30th date or distant future dates)
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfTomorrow = new Date(now);
+    endOfTomorrow.setDate(endOfTomorrow.getDate() + 1);
+    endOfTomorrow.setHours(23, 59, 59, 999);
+
+    if (matchTimeVal < startOfToday || matchTimeVal > endOfTomorrow) {
+      continue;
+    }
+
+    // ⛔ 3. EXCLUDE EXISTING MATCHES (If already in DB by eventId or slug, DO NOT re-load)
     if (matchEventMap.has(eventId) || matchSlugSet.has(generatedSlug)) {
       preservedCount++;
       continue;
@@ -822,11 +833,23 @@ const syncMatchesCore = async () => {
     addedCount++;
   }
 
-  // Auto ON/OFF subcategories based on whether they currently have live/upcoming matches in DB
+  const startOfTodayFilter = new Date(now);
+  startOfTodayFilter.setHours(0, 0, 0, 0);
+  const endOfTomorrowFilter = new Date(now);
+  endOfTomorrowFilter.setDate(endOfTomorrowFilter.getDate() + 1);
+  endOfTomorrowFilter.setHours(23, 59, 59, 999);
+
+  // Auto ON/OFF subcategories based on whether they currently have live/upcoming matches for TODAY & TOMORROW ONLY
   const currentActiveMatches = await db
     .select({ subcategoryId: matches.subcategoryId })
     .from(matches)
-    .where(ne(matches.status, 'finished'));
+    .where(
+      and(
+        ne(matches.status, 'finished'),
+        gte(matches.matchTime, startOfTodayFilter),
+        lte(matches.matchTime, endOfTomorrowFilter)
+      )
+    );
 
   const activeSubcatIdsInDb = new Set(
     currentActiveMatches.map((m) => m.subcategoryId).filter(Boolean)
