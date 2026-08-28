@@ -7,6 +7,17 @@ const { notFound, errorHandler } = require('./middleware/error');
 
 const app = express();
 
+// Disable ETag to prevent HTTP 304 empty body responses on API endpoints
+app.set('etag', false);
+
+// Middleware to disable caching headers for real-time sports API endpoints
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
+
 // Security and middleware
 app.use(helmet());
 app.use(cors());
