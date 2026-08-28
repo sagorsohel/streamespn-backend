@@ -1,4 +1,4 @@
-const { eq, ne, gte, lte, asc, desc, and, or, sql } = require('drizzle-orm');
+const { eq, ne, gte, lte, lt, asc, desc, and, or, sql } = require('drizzle-orm');
 const axios = require('axios');
 const { db, pool, ensureDatabaseExists } = require('../db');
 const { matches, sportsCategories, sportsSubcategories } = require('../db/schema');
@@ -667,7 +667,7 @@ const reorderMatches = async (req, res, next) => {
   }
 };
 
-// Core Sync Function: Syncs Today & Tomorrow, excludes finished matches, and skips existing matches
+// Core Sync Function: Syncs Today & Tomorrow, excludes finished matches, skips existing matches, and deletes past matches
 const syncMatchesCore = async () => {
   await ensureTableExists();
 
@@ -675,7 +675,24 @@ const syncMatchesCore = async () => {
   const today = now.toISOString().split('T')[0];
   const tomorrow = new Date(now.valueOf() + 86400000).toISOString().split('T')[0];
 
-  // Sync Today and Tomorrow ONLY (2 Days)
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+
+  // 🧹 1. Clean up / Delete all past matches prior to today (before 00:00:00 AM today)
+  let deletedCount = 0;
+  try {
+    const deleteRes = await db
+      .delete(matches)
+      .where(lt(matches.matchTime, startOfToday));
+    deletedCount = deleteRes[0]?.affectedRows || 0;
+    if (deletedCount > 0) {
+      console.log(`🧹 [MATCH SYNC] Cleaned up ${deletedCount} past matches prior to ${today}.`);
+    }
+  } catch (delErr) {
+    console.error('❌ [MATCH SYNC] Error cleaning up past matches:', delErr.message);
+  }
+
+  // 📡 2. Sync Today and Tomorrow ONLY (2 Days)
   const datesToSync = [today, tomorrow];
   let rawEvents = [];
 
@@ -695,7 +712,7 @@ const syncMatchesCore = async () => {
   });
 
   if (rawEvents.length === 0) {
-    return { added: 0, preserved: 0, totalFetched: 0 };
+    return { added: 0, preserved: 0, deleted: deletedCount, totalFetched: 0 };
   }
 
   const dbCategories = await db.select().from(sportsCategories);
@@ -782,9 +799,7 @@ const syncMatchesCore = async () => {
       continue;
     }
 
-    // ⛔ 2. EXCLUDE MATCHES BEYOND TOMORROW (Do NOT load 30th date or distant future dates)
-    const startOfToday = new Date(now);
-    startOfToday.setHours(0, 0, 0, 0);
+    // ⛔ 2. EXCLUDE MATCHES OUTSIDE TODAY & TOMORROW
     const endOfTomorrow = new Date(now);
     endOfTomorrow.setDate(endOfTomorrow.getDate() + 1);
     endOfTomorrow.setHours(23, 59, 59, 999);
@@ -878,6 +893,7 @@ const syncMatchesCore = async () => {
   return {
     added: addedCount,
     preserved: preservedCount,
+    deleted: deletedCount,
     activeSubcategoriesTotal: activeSubcatIdsInDb.size,
     turnedOnSubcategories: turnedOnCount,
     turnedOffSubcategories: turnedOffCount,
@@ -891,7 +907,7 @@ const syncMatches = async (req, res, next) => {
     const result = await syncMatchesCore();
     return res.status(200).json({
       success: true,
-      message: `Matches sync completed for Today & Tomorrow! Added ${result.added} new matches, ${result.preserved} matches already existed. Finished matches excluded.`,
+      message: `Matches sync completed for Today & Tomorrow! Deleted ${result.deleted} past matches, added ${result.added} new matches, ${result.preserved} matches preserved.`,
       data: result,
     });
   } catch (error) {
@@ -899,25 +915,25 @@ const syncMatches = async (req, res, next) => {
   }
 };
 
-// Daily 04:00 AM Automated Background Scheduler
-const startDaily4AMScheduler = () => {
+// Daily 12:00 AM (Midnight) Automated Background Scheduler
+const startDaily12AMScheduler = () => {
   const scheduleNextRun = () => {
     const now = new Date();
-    const next4AM = new Date();
-    next4AM.setHours(4, 0, 0, 0);
+    const next12AM = new Date();
+    next12AM.setHours(0, 0, 0, 0);
 
-    if (now >= next4AM) {
-      next4AM.setDate(next4AM.getDate() + 1); // Move to tomorrow 4:00 AM
+    if (now >= next12AM) {
+      next12AM.setDate(next12AM.getDate() + 1); // Target next day 12:00 AM (Midnight)
     }
 
-    const delayMs = next4AM.getTime() - now.getTime();
-    console.log(`[DAILY SYNC CRON] Next auto-sync scheduled for ${next4AM.toLocaleString()} (in ${(delayMs / 3600000).toFixed(2)} hours).`);
+    const delayMs = next12AM.getTime() - now.getTime();
+    console.log(`[DAILY SYNC CRON] Next auto-sync scheduled for midnight ${next12AM.toLocaleString()} (in ${(delayMs / 3600000).toFixed(2)} hours).`);
 
     setTimeout(async () => {
-      console.log('⏰ [DAILY SYNC CRON] Triggering automated 04:00 AM daily match sync...');
+      console.log('⏰ [DAILY SYNC CRON] Triggering automated 12:00 AM (Midnight) daily match sync & cleanup...');
       try {
         const result = await syncMatchesCore();
-        console.log('✅ [DAILY SYNC CRON] Automated 04:00 AM sync completed:', result);
+        console.log('✅ [DAILY SYNC CRON] Automated 12:00 AM sync completed:', result);
       } catch (err) {
         console.error('❌ [DAILY SYNC CRON] Automated sync error:', err.message);
       }
@@ -938,5 +954,6 @@ module.exports = {
   reorderMatches,
   syncMatches,
   syncMatchesCore,
-  startDaily4AMScheduler,
+  startDaily12AMScheduler,
+  startDaily4AMScheduler: startDaily12AMScheduler,
 };

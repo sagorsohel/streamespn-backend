@@ -14,9 +14,9 @@ const startServer = async () => {
     console.log('✅ Database connected successfully via MySQL pool!');
     connection.release();
 
-    // 3. Start automated daily 04:00 AM match sync scheduler
-    const { startDaily4AMScheduler } = require('./controllers/matchesController');
-    startDaily4AMScheduler();
+    // 3. Start automated daily 12:00 AM (Midnight) match sync scheduler
+    const { startDaily12AMScheduler } = require('./controllers/matchesController');
+    startDaily12AMScheduler();
 
     // 4. Start server with automatic port fallback if port is in use
     const startListening = (portToTry) => {
