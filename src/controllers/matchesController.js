@@ -87,7 +87,38 @@ const ensureTableExistsOnce = async () => {
 const getMatches = async (req, res, next) => {
   try {
     await ensureTableExistsOnce();
-    const { status, categoryId, subcategoryId, page, limit } = req.query;
+    const { status, tab, categoryId, subcategoryId, page, limit } = req.query;
+    const filterTab = tab || status;
+
+    const now = new Date();
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date(now);
+    endOfToday.setHours(23, 59, 59, 999);
+    const startOfTomorrow = new Date(now);
+    startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+    startOfTomorrow.setHours(0, 0, 0, 0);
+
+    const conditions = [];
+
+    if (filterTab === 'live') {
+      conditions.push(eq(matches.status, 'live'));
+    } else if (filterTab === 'upcoming') {
+      conditions.push(and(eq(matches.status, 'upcoming'), gte(matches.matchTime, startOfToday), lte(matches.matchTime, endOfToday)));
+    } else if (filterTab === 'nextDay' || filterTab === 'tomorrow') {
+      conditions.push(and(ne(matches.status, 'finished'), ne(matches.status, 'live'), gte(matches.matchTime, startOfTomorrow)));
+    } else if (filterTab === 'finished') {
+      conditions.push(eq(matches.status, 'finished'));
+    } else {
+      conditions.push(ne(matches.status, 'finished'));
+    }
+
+    if (categoryId && categoryId !== 'all') {
+      conditions.push(eq(matches.categoryId, Number(categoryId)));
+    }
+    if (subcategoryId && subcategoryId !== 'all') {
+      conditions.push(eq(matches.subcategoryId, Number(subcategoryId)));
+    }
 
     let query = db
       .select({
@@ -127,20 +158,6 @@ const getMatches = async (req, res, next) => {
       .from(matches)
       .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
       .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id));
-
-    const conditions = [];
-
-    if (status && ['upcoming', 'live', 'finished'].includes(status)) {
-      conditions.push(eq(matches.status, status));
-    } else {
-      conditions.push(ne(matches.status, 'finished'));
-    }
-    if (categoryId && categoryId !== 'all') {
-      conditions.push(eq(matches.categoryId, Number(categoryId)));
-    }
-    if (subcategoryId && subcategoryId !== 'all') {
-      conditions.push(eq(matches.subcategoryId, Number(subcategoryId)));
-    }
 
     if (conditions.length > 0) {
       query = query.where(and(...conditions));
