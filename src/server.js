@@ -14,7 +14,11 @@ const startServer = async () => {
     console.log('✅ Database connected successfully via MySQL pool!');
     connection.release();
 
-    // 3. Start server with automatic port fallback if port is in use
+    // 3. Start automated daily 04:00 AM match sync scheduler
+    const { startDaily4AMScheduler } = require('./controllers/matchesController');
+    startDaily4AMScheduler();
+
+    // 4. Start server with automatic port fallback if port is in use
     const startListening = (portToTry) => {
       const server = app.listen(portToTry, () => {
         console.log(`🚀 StreamESPN Backend Server running in ${process.env.NODE_ENV || 'development'} mode on port ${portToTry}`);

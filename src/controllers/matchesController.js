@@ -611,229 +611,231 @@ const reorderMatches = async (req, res, next) => {
   }
 };
 
-// Auto-Sync Matches from TheSportsDB (Yesterday, Today, Tomorrow) & Auto-Activate Subcategories
-const syncMatches = async (req, res, next) => {
-  try {
-    await ensureTableExists();
+// Core Sync Function: Syncs Today & Tomorrow, excludes finished matches, and skips existing matches
+const syncMatchesCore = async () => {
+  await ensureTableExists();
 
-    // Calculate dates: Yesterday, Today, Tomorrow
-    const now = new Date();
-    const yesterday = new Date(now.valueOf() - 86400000).toISOString().split('T')[0];
-    const today = now.toISOString().split('T')[0];
-    const tomorrow = new Date(now.valueOf() + 86400000).toISOString().split('T')[0];
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
+  const tomorrow = new Date(now.valueOf() + 86400000).toISOString().split('T')[0];
 
-    const datesToSync = [yesterday, today, tomorrow];
-    let rawEvents = [];
+  // Sync Today and Tomorrow ONLY (2 Days)
+  const datesToSync = [today, tomorrow];
+  let rawEvents = [];
 
-    // Fetch 3 days of events from TheSportsDB in parallel
-    const apiResponses = await Promise.all(
-      datesToSync.map((dateStr) =>
-        axios
-          .get(`https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/eventsday.php?d=${dateStr}`, {
-            timeout: 10000,
-          })
-          .then((res) => (res.data && res.data.events ? res.data.events : []))
-          .catch(() => [])
-      )
-    );
+  const apiResponses = await Promise.all(
+    datesToSync.map((dateStr) =>
+      axios
+        .get(`https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/eventsday.php?d=${dateStr}`, {
+          timeout: 10000,
+        })
+        .then((res) => (res.data && res.data.events ? res.data.events : []))
+        .catch(() => [])
+    )
+  );
 
-    apiResponses.forEach((events) => {
-      rawEvents.push(...events);
+  apiResponses.forEach((events) => {
+    rawEvents.push(...events);
+  });
+
+  if (rawEvents.length === 0) {
+    return { added: 0, preserved: 0, totalFetched: 0 };
+  }
+
+  const dbCategories = await db.select().from(sportsCategories);
+  const dbSubcategories = await db.select().from(sportsSubcategories);
+  const dbMatches = await db.select().from(matches);
+
+  const categoryMap = new Map(dbCategories.map((c) => [c.sportName.toLowerCase().trim(), c]));
+  const subcategoryMap = new Map(dbSubcategories.map((s) => [s.name.toLowerCase().trim(), s]));
+  const matchEventMap = new Map(
+    dbMatches.filter((m) => m.sportsdbEventId).map((m) => [m.sportsdbEventId, m])
+  );
+  const matchSlugSet = new Set(dbMatches.map((m) => m.slug));
+
+  let maxOrder = dbMatches.reduce((max, item) => Math.max(max, item.displayOrder || 0), 0);
+  let addedCount = 0;
+  let preservedCount = 0;
+  const activeSubcategoryIds = new Set();
+
+  for (const ev of rawEvents) {
+    const eventId = ev.idEvent;
+    const sportName = (ev.strSport || '').trim();
+    const leagueName = (ev.strLeague || '').trim();
+    const homeTeam = (ev.strHomeTeam || '').trim();
+    const awayTeam = (ev.strAwayTeam || '').trim();
+    const eventName = (ev.strEvent || '').trim();
+    const eventDateStr = ev.dateEvent || today;
+
+    const matchedCategory = categoryMap.get(sportName.toLowerCase());
+    if (!matchedCategory) continue;
+
+    const categoryId = matchedCategory.id;
+    const matchedSubcat = subcategoryMap.get(leagueName.toLowerCase());
+    const subcategoryId = matchedSubcat ? matchedSubcat.id : null;
+
+    const isTeamVsTeam = homeTeam && awayTeam;
+    const matchType = isTeamVsTeam ? 'team_vs_team' : 'title_event';
+    const title = isTeamVsTeam ? null : eventName;
+    const generatedSlug = isTeamVsTeam
+      ? slugify(`${homeTeam}-vs-${awayTeam}-${eventDateStr}`)
+      : slugify(`${eventName}-${eventDateStr}`);
+
+    let matchTimeVal = new Date();
+    if (ev.strTimestamp) {
+      const ts = ev.strTimestamp.endsWith('Z') || ev.strTimestamp.includes('+') ? ev.strTimestamp : `${ev.strTimestamp}Z`;
+      matchTimeVal = new Date(ts);
+    } else if (ev.dateEvent) {
+      const timePart = ev.strTime || '00:00:00';
+      matchTimeVal = new Date(`${ev.dateEvent}T${timePart}Z`);
+    }
+
+    let status = 'upcoming';
+    const statusStr = (ev.strStatus || '').toLowerCase().trim();
+
+    if (
+      statusStr.includes('finished') ||
+      statusStr.includes('ft') ||
+      statusStr.includes('aet')
+    ) {
+      status = 'finished';
+    } else if (
+      statusStr.includes('live') ||
+      statusStr.includes('in play') ||
+      statusStr.includes('1h') ||
+      statusStr.includes('2h') ||
+      statusStr.includes('1st') ||
+      statusStr.includes('2nd') ||
+      statusStr.includes('ht') ||
+      statusStr.includes('q1') ||
+      statusStr.includes('q2') ||
+      statusStr.includes('q3') ||
+      statusStr.includes('q4')
+    ) {
+      status = 'live';
+    } else if (matchTimeVal > now) {
+      status = 'upcoming';
+    } else if (matchTimeVal < new Date(now.getTime() - 4 * 3600 * 1000) && ev.intHomeScore !== null) {
+      status = 'finished';
+    } else {
+      status = 'upcoming';
+    }
+
+    // ⛔ 1. EXCLUDE FINISHED MATCHES (Do NOT load ended matches)
+    if (status === 'finished') {
+      continue;
+    }
+
+    // ⛔ 2. EXCLUDE EXISTING MATCHES (If already in DB by eventId or slug, DO NOT re-load)
+    if (matchEventMap.has(eventId) || matchSlugSet.has(generatedSlug)) {
+      preservedCount++;
+      continue;
+    }
+
+    if (subcategoryId) {
+      activeSubcategoryIds.add(subcategoryId);
+    }
+
+    // Insert new match
+    maxOrder++;
+    await db.insert(matches).values({
+      sportsdbEventId: eventId,
+      categoryId: categoryId,
+      subcategoryId: subcategoryId,
+      matchType: matchType,
+      slug: generatedSlug,
+      title: title,
+      homeTeam: isTeamVsTeam ? homeTeam : null,
+      homeTeamLogo: ev.strHomeTeamBadge || null,
+      awayTeam: isTeamVsTeam ? awayTeam : null,
+      awayTeamLogo: ev.strAwayTeamBadge || null,
+      homeScore: ev.intHomeScore !== null && ev.intHomeScore !== undefined ? String(ev.intHomeScore) : null,
+      awayScore: ev.intAwayScore !== null && ev.intAwayScore !== undefined ? String(ev.intAwayScore) : null,
+      livePeriod: ev.strStatus || null,
+      liveMinute: ev.strProgress || null,
+      matchTime: matchTimeVal,
+      status: status,
+      venue: ev.strVenue || null,
+      playerImage: ev.strThumb || null,
+      bgImage: ev.strBanner || null,
+      referralLink: null,
+      displayOrder: maxOrder,
+      isCustomized: false,
     });
 
-    if (rawEvents.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: 'No events returned from TheSportsDB for Yesterday, Today, or Tomorrow.',
-        data: { added: 0, updated: 0, preserved: 0 },
-      });
+    addedCount++;
+  }
+
+  // Auto-activate all subcategories that received matches
+  if (activeSubcategoryIds.size > 0) {
+    for (const subId of Array.from(activeSubcategoryIds)) {
+      await db
+        .update(sportsSubcategories)
+        .set({ status: true })
+        .where(eq(sportsSubcategories.id, subId));
     }
+  }
 
-    // Fetch existing Categories & Subcategories from DB
-    const dbCategories = await db.select().from(sportsCategories);
-    const dbSubcategories = await db.select().from(sportsSubcategories);
-    const dbMatches = await db.select().from(matches);
+  return {
+    added: addedCount,
+    preserved: preservedCount,
+    activatedSubcategories: activeSubcategoryIds.size,
+    totalFetched: rawEvents.length,
+  };
+};
 
-    const categoryMap = new Map(dbCategories.map((c) => [c.sportName.toLowerCase().trim(), c]));
-    const subcategoryMap = new Map(dbSubcategories.map((s) => [s.name.toLowerCase().trim(), s]));
-    const matchEventMap = new Map(
-      dbMatches.filter((m) => m.sportsdbEventId).map((m) => [m.sportsdbEventId, m])
-    );
-
-    let maxOrder = dbMatches.reduce((max, item) => Math.max(max, item.displayOrder || 0), 0);
-    let addedCount = 0;
-    let updatedCount = 0;
-    let preservedCount = 0;
-    const activeSubcategoryIds = new Set();
-
-    for (const ev of rawEvents) {
-      const eventId = ev.idEvent;
-      const sportName = (ev.strSport || '').trim();
-      const leagueName = (ev.strLeague || '').trim();
-      const homeTeam = (ev.strHomeTeam || '').trim();
-      const awayTeam = (ev.strAwayTeam || '').trim();
-      const eventName = (ev.strEvent || '').trim();
-      const eventDateStr = ev.dateEvent || today;
-
-      // Find or match category
-      const matchedCategory = categoryMap.get(sportName.toLowerCase());
-      if (!matchedCategory) continue; // Only import events for sports categories present in DB!
-
-      const categoryId = matchedCategory.id;
-      const matchedSubcat = subcategoryMap.get(leagueName.toLowerCase());
-      const subcategoryId = matchedSubcat ? matchedSubcat.id : null;
-
-      if (subcategoryId) {
-        activeSubcategoryIds.add(subcategoryId);
-      }
-
-      // Determine match type
-      const isTeamVsTeam = homeTeam && awayTeam;
-      const matchType = isTeamVsTeam ? 'team_vs_team' : 'title_event';
-      const title = isTeamVsTeam ? null : eventName;
-      const generatedSlug = isTeamVsTeam
-        ? slugify(`${homeTeam}-vs-${awayTeam}-${eventDateStr}`)
-        : slugify(`${eventName}-${eventDateStr}`);
-
-      // Determine match time strictly in UTC
-      let matchTimeVal = new Date();
-      if (ev.strTimestamp) {
-        const ts = ev.strTimestamp.endsWith('Z') || ev.strTimestamp.includes('+') ? ev.strTimestamp : `${ev.strTimestamp}Z`;
-        matchTimeVal = new Date(ts);
-      } else if (ev.dateEvent) {
-        const timePart = ev.strTime || '00:00:00';
-        matchTimeVal = new Date(`${ev.dateEvent}T${timePart}Z`);
-      }
-
-      const now = new Date();
-
-      // Determine status strictly based on real match status & time
-      let status = 'upcoming';
-      const statusStr = (ev.strStatus || '').toLowerCase().trim();
-
-      if (
-        statusStr.includes('finished') ||
-        statusStr.includes('ft') ||
-        statusStr.includes('aet')
-      ) {
-        status = 'finished';
-      } else if (
-        statusStr.includes('live') ||
-        statusStr.includes('in play') ||
-        statusStr.includes('1h') ||
-        statusStr.includes('2h') ||
-        statusStr.includes('1st') ||
-        statusStr.includes('2nd') ||
-        statusStr.includes('ht') ||
-        statusStr.includes('q1') ||
-        statusStr.includes('q2') ||
-        statusStr.includes('q3') ||
-        statusStr.includes('q4')
-      ) {
-        status = 'live';
-      } else if (matchTimeVal > now) {
-        status = 'upcoming';
-      } else if (matchTimeVal < new Date(now.getTime() - 4 * 3600 * 1000) && ev.intHomeScore !== null) {
-        status = 'finished';
-      } else {
-        status = 'upcoming';
-      }
-
-      // Check if match already exists in DB
-      const existingMatch = matchEventMap.get(eventId);
-
-      if (existingMatch) {
-        // ADMIN LOCK PROTECTION: If admin customized this match, DO NOT overwrite!
-        if (existingMatch.isCustomized) {
-          preservedCount++;
-          continue;
-        }
-
-        // Update existing match from SportsDB
-        await db
-          .update(matches)
-          .set({
-            slug: existingMatch.slug || generatedSlug,
-            matchTime: matchTimeVal,
-            homeScore: ev.intHomeScore !== null && ev.intHomeScore !== undefined ? String(ev.intHomeScore) : existingMatch.homeScore,
-            awayScore: ev.intAwayScore !== null && ev.intAwayScore !== undefined ? String(ev.intAwayScore) : existingMatch.awayScore,
-            livePeriod: ev.strStatus || existingMatch.livePeriod,
-            liveMinute: ev.strProgress || existingMatch.liveMinute,
-            homeTeamLogo: ev.strHomeTeamBadge || existingMatch.homeTeamLogo,
-            awayTeamLogo: ev.strAwayTeamBadge || existingMatch.awayTeamLogo,
-            status: status,
-            venue: ev.strVenue || existingMatch.venue,
-            playerImage: ev.strThumb || existingMatch.playerImage,
-          })
-          .where(eq(matches.id, existingMatch.id));
-
-        updatedCount++;
-      } else {
-        // Insert new match
-        maxOrder++;
-
-        await db.insert(matches).values({
-          sportsdbEventId: eventId,
-          categoryId: categoryId,
-          subcategoryId: subcategoryId,
-          matchType: matchType,
-          slug: generatedSlug,
-          title: title,
-          homeTeam: isTeamVsTeam ? homeTeam : null,
-          homeTeamLogo: ev.strHomeTeamBadge || null,
-          awayTeam: isTeamVsTeam ? awayTeam : null,
-          awayTeamLogo: ev.strAwayTeamBadge || null,
-          homeScore: ev.intHomeScore !== null && ev.intHomeScore !== undefined ? String(ev.intHomeScore) : null,
-          awayScore: ev.intAwayScore !== null && ev.intAwayScore !== undefined ? String(ev.intAwayScore) : null,
-          livePeriod: ev.strStatus || null,
-          liveMinute: ev.strProgress || null,
-          matchTime: matchTimeVal,
-          status: status,
-          venue: ev.strVenue || null,
-          playerImage: ev.strThumb || null,
-          bgImage: ev.strBanner || null,
-          referralLink: null,
-          displayOrder: maxOrder,
-          isCustomized: false,
-        });
-
-        addedCount++;
-      }
-    }
-
-    // Auto-activate all subcategories that have matches!
-    if (activeSubcategoryIds.size > 0) {
-      for (const subId of Array.from(activeSubcategoryIds)) {
-        await db
-          .update(sportsSubcategories)
-          .set({ status: true })
-          .where(eq(sportsSubcategories.id, subId));
-      }
-    }
-
+// Express Route Controller: Triggered by Admin "Sync Matches (Today & Tomorrow)" button
+const syncMatches = async (req, res, next) => {
+  try {
+    const result = await syncMatchesCore();
     return res.status(200).json({
       success: true,
-      message: `Matches sync completed! Added: ${addedCount}, Updated: ${updatedCount}, Preserved: ${preservedCount}. Subcategories with active matches were automatically turned ON!`,
-      data: {
-        added: addedCount,
-        updated: updatedCount,
-        preserved: preservedCount,
-        activatedSubcategories: activeSubcategoryIds.size,
-        totalFetched: rawEvents.length,
-      },
+      message: `Matches sync completed for Today & Tomorrow! Added ${result.added} new matches, ${result.preserved} matches already existed. Finished matches excluded.`,
+      data: result,
     });
   } catch (error) {
     next(error);
   }
 };
 
+// Daily 04:00 AM Automated Background Scheduler
+const startDaily4AMScheduler = () => {
+  const scheduleNextRun = () => {
+    const now = new Date();
+    const next4AM = new Date();
+    next4AM.setHours(4, 0, 0, 0);
+
+    if (now >= next4AM) {
+      next4AM.setDate(next4AM.getDate() + 1); // Move to tomorrow 4:00 AM
+    }
+
+    const delayMs = next4AM.getTime() - now.getTime();
+    console.log(`[DAILY SYNC CRON] Next auto-sync scheduled for ${next4AM.toLocaleString()} (in ${(delayMs / 3600000).toFixed(2)} hours).`);
+
+    setTimeout(async () => {
+      console.log('⏰ [DAILY SYNC CRON] Triggering automated 04:00 AM daily match sync...');
+      try {
+        const result = await syncMatchesCore();
+        console.log('✅ [DAILY SYNC CRON] Automated 04:00 AM sync completed:', result);
+      } catch (err) {
+        console.error('❌ [DAILY SYNC CRON] Automated sync error:', err.message);
+      }
+      scheduleNextRun();
+    }, delayMs);
+  };
+
+  scheduleNextRun();
+};
+
 module.exports = {
   getMatches,
-  getMatchById,
   getLiveScores,
+  getMatchById,
   createMatch,
   updateMatch,
   deleteMatch,
   reorderMatches,
   syncMatches,
+  syncMatchesCore,
+  startDaily4AMScheduler,
 };
