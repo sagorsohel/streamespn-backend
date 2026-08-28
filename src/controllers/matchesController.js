@@ -1,4 +1,4 @@
-const { eq, asc, desc, and, or, sql } = require('drizzle-orm');
+const { eq, ne, asc, desc, and, or, sql } = require('drizzle-orm');
 const axios = require('axios');
 const { db, pool, ensureDatabaseExists } = require('../db');
 const { matches, sportsCategories, sportsSubcategories } = require('../db/schema');
@@ -74,14 +74,12 @@ const ensureTableExists = async () => {
   connection.release();
 };
 
+// Ensure matches table exists (lazy-init singleton lock)
 let isTableChecked = false;
 const ensureTableExistsOnce = async () => {
-  if (isTableChecked) return;
-  try {
+  if (!isTableChecked) {
     await ensureTableExists();
     isTableChecked = true;
-  } catch (e) {
-    // retry next time
   }
 };
 
@@ -134,6 +132,8 @@ const getMatches = async (req, res, next) => {
 
     if (status && ['upcoming', 'live', 'finished'].includes(status)) {
       conditions.push(eq(matches.status, status));
+    } else {
+      conditions.push(ne(matches.status, 'finished'));
     }
     if (categoryId && categoryId !== 'all') {
       conditions.push(eq(matches.categoryId, Number(categoryId)));
