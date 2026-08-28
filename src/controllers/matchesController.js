@@ -822,20 +822,42 @@ const syncMatchesCore = async () => {
     addedCount++;
   }
 
-  // Auto-activate all subcategories that received matches
-  if (activeSubcategoryIds.size > 0) {
-    for (const subId of Array.from(activeSubcategoryIds)) {
+  // Auto ON/OFF subcategories based on whether they currently have live/upcoming matches in DB
+  const currentActiveMatches = await db
+    .select({ subcategoryId: matches.subcategoryId })
+    .from(matches)
+    .where(ne(matches.status, 'finished'));
+
+  const activeSubcatIdsInDb = new Set(
+    currentActiveMatches.map((m) => m.subcategoryId).filter(Boolean)
+  );
+
+  const allSubcategories = await db
+    .select({ id: sportsSubcategories.id, status: sportsSubcategories.status })
+    .from(sportsSubcategories);
+
+  let turnedOnCount = 0;
+  let turnedOffCount = 0;
+
+  for (const subcat of allSubcategories) {
+    const shouldBeOn = activeSubcatIdsInDb.has(subcat.id);
+    if (Boolean(subcat.status) !== shouldBeOn) {
       await db
         .update(sportsSubcategories)
-        .set({ status: true })
-        .where(eq(sportsSubcategories.id, subId));
+        .set({ status: shouldBeOn })
+        .where(eq(sportsSubcategories.id, subcat.id));
+
+      if (shouldBeOn) turnedOnCount++;
+      else turnedOffCount++;
     }
   }
 
   return {
     added: addedCount,
     preserved: preservedCount,
-    activatedSubcategories: activeSubcategoryIds.size,
+    activeSubcategoriesTotal: activeSubcatIdsInDb.size,
+    turnedOnSubcategories: turnedOnCount,
+    turnedOffSubcategories: turnedOffCount,
     totalFetched: rawEvents.length,
   };
 };
