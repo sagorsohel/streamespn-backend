@@ -114,10 +114,38 @@ const getMatches = async (req, res, next) => {
     }
 
     if (categoryId && categoryId !== 'all') {
-      conditions.push(eq(matches.categoryId, Number(categoryId)));
+      const catNum = Number(categoryId);
+      if (!isNaN(catNum)) {
+        conditions.push(eq(matches.categoryId, catNum));
+      } else {
+        try {
+          const catRes = await db
+            .select({ id: sportsCategories.id })
+            .from(sportsCategories)
+            .where(sql`LOWER(REPLACE(${sportsCategories.sportName}, ' ', '-')) = ${String(categoryId).toLowerCase()}`)
+            .limit(1);
+          if (catRes.length > 0) {
+            conditions.push(eq(matches.categoryId, catRes[0].id));
+          }
+        } catch (e) {}
+      }
     }
     if (subcategoryId && subcategoryId !== 'all') {
-      conditions.push(eq(matches.subcategoryId, Number(subcategoryId)));
+      const subNum = Number(subcategoryId);
+      if (!isNaN(subNum)) {
+        conditions.push(eq(matches.subcategoryId, subNum));
+      } else {
+        try {
+          const subRes = await db
+            .select({ id: sportsSubcategories.id })
+            .from(sportsSubcategories)
+            .where(sql`LOWER(REPLACE(${sportsSubcategories.name}, ' ', '-')) = ${String(subcategoryId).toLowerCase()}`)
+            .limit(1);
+          if (subRes.length > 0) {
+            conditions.push(eq(matches.subcategoryId, subRes[0].id));
+          }
+        } catch (e) {}
+      }
     }
 
     let query = db
