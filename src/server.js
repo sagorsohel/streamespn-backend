@@ -14,8 +14,17 @@ const startServer = async () => {
     console.log('✅ Database connected successfully via MySQL pool!');
     connection.release();
 
-    // 3. Start automated daily 12:00 AM (Midnight) match sync scheduler
-    const { startDaily12AMScheduler } = require('./controllers/matchesController');
+    // 3. Automated Boot Migration & Match Sync (100% zero-command-line Hostinger automated sync)
+    const { syncMatchesCore, startDaily12AMScheduler } = require('./controllers/matchesController');
+    console.log('🔄 [BOOT] Running automatic database migration and match sync on server boot...');
+    syncMatchesCore()
+      .then((res) => {
+        console.log('✅ [BOOT] Match sync on server boot completed successfully:', res);
+      })
+      .catch((err) => {
+        console.error('⚠️ [BOOT] Match sync warning:', err.message);
+      });
+
     startDaily12AMScheduler();
 
     // 4. Start server with automatic port fallback if port is in use
