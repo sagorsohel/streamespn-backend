@@ -340,10 +340,19 @@ const getMatchById = async (req, res, next) => {
       const decoded = decodeURIComponent(id);
       const slugifiedId = slugify(id);
       const slugifiedDecoded = slugify(decoded);
+      const spanishVariation1 = id.replace(/espaa/g, 'espana').replace(/espana/g, 'espaa');
+      const spanishVariation2 = decoded.replace(/espaa/g, 'espana').replace(/espana/g, 'espaa');
 
-      const candidates = Array.from(new Set([decoded, slugifiedId, slugifiedDecoded])).filter(
-        (c) => c && c !== id
-      );
+      const candidates = Array.from(
+        new Set([
+          decoded,
+          slugifiedId,
+          slugifiedDecoded,
+          spanishVariation1,
+          spanishVariation2,
+          slugify(spanishVariation1),
+        ])
+      ).filter((c) => c && c !== id);
 
       for (const cand of candidates) {
         found = await db
