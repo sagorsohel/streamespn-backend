@@ -9,11 +9,14 @@ const slugify = (text) => {
   if (!text) return '';
   return text
     .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim()
     .replace(/\s+/g, '-')
     .replace(/[^\w\-]+/g, '')
-    .replace(/\-\-+/g, '-');
+    .replace(/\-\-+/g, '-')
+    .replace(/^-+|-+$/g, '');
 };
 
 // Helper to ensure matches table exists & auto-activate subcategories with matches
@@ -368,14 +371,14 @@ const getMatchById = async (req, res, next) => {
       const decoded = decodeURIComponent(id);
       const slugifiedId = slugify(id);
       const slugifiedDecoded = slugify(decoded);
-      const spanishVariation1 = id.replace(/espaa/g, 'espana').replace(/espana/g, 'espaa');
-      const spanishVariation2 = decoded.replace(/espaa/g, 'espana').replace(/espana/g, 'espaa');
+      const legacyStripped = decoded.toLowerCase().replace(/[^\w\-]+/g, '').replace(/\-\-+/g, '-');
 
       const candidates = Array.from(
         new Set([
           decoded,
           slugifiedId,
           slugifiedDecoded,
+          legacyStripped,
           spanishVariation1,
           spanishVariation2,
           slugify(spanishVariation1),
@@ -425,6 +428,67 @@ const getMatchById = async (req, res, next) => {
           .limit(1);
 
         if (found.length > 0) break;
+      }
+    }
+
+    // Fuzzy team lookup if exact slug candidate matches were not found
+    if (found.length === 0 && !isNum && id.includes('-vs-')) {
+      try {
+        const parts = id.split('-vs-');
+        if (parts.length >= 2) {
+          const team1 = parts[0].replace(/-\d{4}-\d{2}-\d{2}$/, '').trim();
+          const team2 = parts[1].replace(/-\d{4}-\d{2}-\d{2}$/, '').trim();
+
+          if (team1 && team2) {
+            found = await db
+              .select({
+                id: matches.id,
+                sportsdbEventId: matches.sportsdbEventId,
+                categoryId: matches.categoryId,
+                subcategoryId: matches.subcategoryId,
+                matchType: matches.matchType,
+                slug: matches.slug,
+                title: matches.title,
+                homeTeam: matches.homeTeam,
+                homeTeamLogo: matches.homeTeamLogo,
+                awayTeam: matches.awayTeam,
+                awayTeamLogo: matches.awayTeamLogo,
+                homeScore: matches.homeScore,
+                awayScore: matches.awayScore,
+                livePeriod: matches.livePeriod,
+                liveMinute: matches.liveMinute,
+                matchTime: matches.matchTime,
+                status: matches.status,
+                venue: matches.venue,
+                playerImage: matches.playerImage,
+                bgImage: matches.bgImage,
+                referralLink: matches.referralLink,
+                displayOrder: matches.displayOrder,
+                isCustomized: matches.isCustomized,
+                createdAt: matches.createdAt,
+                updatedAt: matches.updatedAt,
+                categoryName: sportsCategories.sportName,
+                categoryLogo: sportsCategories.iconUrl,
+                categoryPlayerImage: sportsCategories.playerImage,
+                categoryThumbUrl: sportsCategories.thumbUrl,
+                categoryReferralLink: sportsCategories.referralLink,
+                subcategoryName: sportsSubcategories.name,
+                subcategoryLogo: sportsSubcategories.logoUrl,
+              })
+              .from(matches)
+              .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
+              .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
+              .where(
+                and(
+                  sql`${matches.slug} LIKE ${'%' + team1 + '%'}`,
+                  sql`${matches.slug} LIKE ${'%' + team2 + '%'}`
+                )
+              )
+              .limit(1);
+          }
+        }
+      } catch (e) {
+        // ignore
       }
     }
 
