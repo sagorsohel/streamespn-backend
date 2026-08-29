@@ -6,6 +6,7 @@ const {
   createMatch,
   updateMatch,
   deleteMatch,
+  deleteAllMatches,
   reorderMatches,
   syncMatches,
 } = require('../controllers/matchesController');
@@ -20,6 +21,7 @@ router.post('/', verifyToken, createMatch);
 router.post('/sync', verifyToken, syncMatches);
 router.put('/reorder', verifyToken, reorderMatches);
 router.put('/:id', verifyToken, updateMatch);
+router.delete('/all', verifyToken, deleteAllMatches);
 router.delete('/:id', verifyToken, deleteMatch);
 
 module.exports = router;

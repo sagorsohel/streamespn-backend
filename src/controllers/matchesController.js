@@ -19,6 +19,56 @@ const slugify = (text) => {
     .replace(/^-+|-+$/g, '');
 };
 
+// Helper to generate guaranteed clean & unique URL slug with team names, date, and UTC time
+const generateCleanMatchSlug = (homeTeam, awayTeam, title, matchTime, eventId = '') => {
+  const d = matchTime ? new Date(matchTime) : new Date();
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const hours = String(d.getUTCHours()).padStart(2, '0');
+  const minutes = String(d.getUTCMinutes()).padStart(2, '0');
+  const dateTimeStr = `${year}-${month}-${day}-${hours}-${minutes}`;
+
+  const cleanHome = slugify(homeTeam);
+  const cleanAway = slugify(awayTeam);
+  const cleanTitle = slugify(title);
+
+  if (cleanHome && cleanAway) {
+    return `${cleanHome}-vs-${cleanAway}-${dateTimeStr}`;
+  } else if (cleanTitle) {
+    return `${cleanTitle}-${dateTimeStr}`;
+  }
+  return `match-${eventId || Date.now()}-${dateTimeStr}`;
+};
+
+let isSlugMigrationDone = false;
+const cleanAndMigrateExistingSlugs = async () => {
+  if (isSlugMigrationDone) return;
+  isSlugMigrationDone = true;
+  try {
+    const allDbMatches = await db
+      .select({
+        id: matches.id,
+        homeTeam: matches.homeTeam,
+        awayTeam: matches.awayTeam,
+        title: matches.title,
+        matchTime: matches.matchTime,
+        sportsdbEventId: matches.sportsdbEventId,
+        slug: matches.slug,
+      })
+      .from(matches);
+
+    for (const m of allDbMatches) {
+      const clean = generateCleanMatchSlug(m.homeTeam, m.awayTeam, m.title, m.matchTime, m.sportsdbEventId || m.id);
+      if (clean && clean !== m.slug) {
+        await db.update(matches).set({ slug: clean }).where(eq(matches.id, m.id));
+      }
+    }
+  } catch (err) {
+    // ignore
+  }
+};
+
 // Helper to ensure matches table exists & auto-activate subcategories with matches
 const ensureTableExists = async () => {
   await ensureDatabaseExists();
@@ -82,6 +132,7 @@ let isTableChecked = false;
 const ensureTableExistsOnce = async () => {
   if (!isTableChecked) {
     await ensureTableExists();
+    await cleanAndMigrateExistingSlugs();
     isTableChecked = true;
   }
 };
@@ -862,15 +913,51 @@ const syncMatchesCore = async () => {
     if (!matchedCategory) continue;
 
     const categoryId = matchedCategory.id;
-    const matchedSubcat = subcategoryMap.get(leagueName.toLowerCase());
-    const subcategoryId = matchedSubcat ? matchedSubcat.id : null;
+    let subcategoryId = null;
+
+    if (leagueName) {
+      const lowerLeague = leagueName.toLowerCase();
+      let matchedSubcat = subcategoryMap.get(lowerLeague);
+
+      if (!matchedSubcat) {
+        try {
+          const [subResult] = await db.insert(sportsSubcategories).values({
+            categoryId: categoryId,
+            name: leagueName,
+            logoUrl: ev.strBadge || ev.strPoster || ev.strLogo || null,
+            description: null,
+            status: true,
+          });
+
+          matchedSubcat = {
+            id: subResult.insertId,
+            categoryId: categoryId,
+            name: leagueName,
+            status: true,
+          };
+          subcategoryMap.set(lowerLeague, matchedSubcat);
+        } catch (subErr) {
+          // ignore
+        }
+      }
+
+      if (matchedSubcat) {
+        subcategoryId = matchedSubcat.id;
+        if (!matchedSubcat.status) {
+          matchedSubcat.status = true;
+          try {
+            await db
+              .update(sportsSubcategories)
+              .set({ status: true })
+              .where(eq(sportsSubcategories.id, matchedSubcat.id));
+          } catch (e) {}
+        }
+      }
+    }
 
     const isTeamVsTeam = homeTeam && awayTeam;
     const matchType = isTeamVsTeam ? 'team_vs_team' : 'title_event';
     const title = isTeamVsTeam ? null : eventName;
-    const generatedSlug = isTeamVsTeam
-      ? slugify(`${homeTeam}-vs-${awayTeam}-${eventDateStr}`)
-      : slugify(`${eventName}-${eventDateStr}`);
 
     let matchTimeVal = new Date();
     if (ev.strTimestamp) {
@@ -880,6 +967,8 @@ const syncMatchesCore = async () => {
       const timePart = ev.strTime || '00:00:00';
       matchTimeVal = new Date(`${ev.dateEvent}T${timePart}Z`);
     }
+
+    const generatedSlug = generateCleanMatchSlug(homeTeam, awayTeam, title, matchTimeVal, eventId);
 
     let status = 'upcoming';
     const statusStr = (ev.strStatus || '').toLowerCase().trim();
@@ -1062,6 +1151,24 @@ const startDaily12AMScheduler = () => {
   scheduleNextRun();
 };
 
+// Express Route Controller: Delete/Clear ALL matches from database
+const deleteAllMatches = async (req, res, next) => {
+  try {
+    await ensureTableExistsOnce();
+    const connection = await pool.getConnection();
+    await connection.query('DELETE FROM `matches`;');
+    await connection.query('UPDATE `sports_subcategories` SET `status` = 0;');
+    connection.release();
+
+    return res.status(200).json({
+      success: true,
+      message: 'All match data removed successfully! Subcategories status reset.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getMatches,
   getLiveScores,
@@ -1069,6 +1176,7 @@ module.exports = {
   createMatch,
   updateMatch,
   deleteMatch,
+  deleteAllMatches,
   reorderMatches,
   syncMatches,
   syncMatchesCore,
