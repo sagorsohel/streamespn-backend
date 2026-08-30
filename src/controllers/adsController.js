@@ -34,8 +34,9 @@ const ensureTableExists = async () => {
 let cachedAdsSettings = null;
 let isTableInitialized = false;
 
-// DEDICATED ULTRA-FAST ADS ENDPOINT (0ms RAM response)
+// DEDICATED ULTRA-FAST ADS ENDPOINT (0ms RAM response + Browser HTTP Cache)
 const getAdsFast = (req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
   return res.status(200).json({
     success: true,
     data: {
