@@ -1,4 +1,4 @@
-const { eq, ne, gte, lte, lt, asc, desc, and, or, sql } = require('drizzle-orm');
+const { eq, ne, gte, lte, lt, asc, desc, and, or, isNull, sql } = require('drizzle-orm');
 const axios = require('axios');
 const { db, pool, ensureDatabaseExists } = require('../db');
 const { matches, sportsCategories, sportsSubcategories } = require('../db/schema');
@@ -113,17 +113,6 @@ const ensureTableExists = async () => {
     await connection.query(`ALTER TABLE \`matches\` ADD COLUMN \`live_period\` VARCHAR(50);`);
   } catch (e) {}
 
-  // AUTO-ACTIVATE: Turn ON status (status = 1) for all subcategories that have matches assigned!
-  try {
-    await connection.query(`
-      UPDATE \`sports_subcategories\` 
-      SET \`status\` = 1 
-      WHERE \`id\` IN (SELECT DISTINCT \`subcategory_id\` FROM \`matches\` WHERE \`subcategory_id\` IS NOT NULL);
-    `);
-  } catch (e) {
-    // ignore
-  }
-
   connection.release();
 };
 
@@ -141,8 +130,9 @@ const ensureTableExistsOnce = async () => {
 const getMatches = async (req, res, next) => {
   try {
     await ensureTableExistsOnce();
-    const { status, tab, categoryId, subcategoryId, page, limit } = req.query;
+    const { status, tab, categoryId, subcategoryId, page, limit, all, admin } = req.query;
     const filterTab = tab || status;
+    const showAll = all === 'true' || all === '1' || admin === 'true';
 
     const now = new Date();
     const startOfToday = new Date(now);
@@ -154,6 +144,11 @@ const getMatches = async (req, res, next) => {
     startOfTomorrow.setHours(0, 0, 0, 0);
 
     const conditions = [];
+
+    // Filter out matches of disabled subcategories for public website queries
+    if (!showAll) {
+      conditions.push(or(isNull(matches.subcategoryId), eq(sportsSubcategories.status, true)));
+    }
 
     if (filterTab === 'live') {
       conditions.push(eq(matches.status, 'live'));
@@ -348,6 +343,14 @@ const getLiveScores = async (req, res, next) => {
     // Auto-sync with SportsDB live score feed (throttled 20s)
     await syncLiveScoresWithSportsDB();
 
+    const { all, admin } = req.query;
+    const showAll = all === 'true' || all === '1' || admin === 'true';
+
+    const conditions = [eq(matches.status, 'live')];
+    if (!showAll) {
+      conditions.push(or(isNull(matches.subcategoryId), eq(sportsSubcategories.status, true)));
+    }
+
     const liveMatches = await db
       .select({
         id: matches.id,
@@ -358,7 +361,8 @@ const getLiveScores = async (req, res, next) => {
         status: matches.status,
       })
       .from(matches)
-      .where(eq(matches.status, 'live'));
+      .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
+      .where(and(...conditions));
 
     return res.status(200).json({
       success: true,
@@ -374,7 +378,14 @@ const getMatchById = async (req, res, next) => {
   try {
     await ensureTableExists();
     const { id } = req.params;
+    const { all, admin } = req.query;
+    const showAll = all === 'true' || all === '1' || admin === 'true';
     const isNum = !isNaN(Number(id));
+
+    const baseWhere = (whereCond) =>
+      showAll
+        ? whereCond
+        : and(whereCond, or(isNull(matches.subcategoryId), eq(sportsSubcategories.status, true)));
 
     let found = await db
       .select({
@@ -414,7 +425,7 @@ const getMatchById = async (req, res, next) => {
       .from(matches)
       .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
       .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
-      .where(isNum ? eq(matches.id, Number(id)) : eq(matches.slug, id))
+      .where(baseWhere(isNum ? eq(matches.id, Number(id)) : eq(matches.slug, id)))
       .limit(1);
 
     // Fallback candidate search for URL-encoded, special character, or slugified variants
@@ -423,6 +434,8 @@ const getMatchById = async (req, res, next) => {
       const slugifiedId = slugify(id);
       const slugifiedDecoded = slugify(decoded);
       const legacyStripped = decoded.toLowerCase().replace(/[^\w\-]+/g, '').replace(/\-\-+/g, '-');
+      const spanishVariation1 = decoded.replace(/espaa/g, 'espana');
+      const spanishVariation2 = decoded.replace(/espana/g, 'espaa');
 
       const candidates = Array.from(
         new Set([
@@ -475,7 +488,7 @@ const getMatchById = async (req, res, next) => {
           .from(matches)
           .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
           .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
-          .where(eq(matches.slug, cand))
+          .where(baseWhere(eq(matches.slug, cand)))
           .limit(1);
 
         if (found.length > 0) break;
@@ -530,9 +543,11 @@ const getMatchById = async (req, res, next) => {
               .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
               .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
               .where(
-                and(
-                  sql`${matches.slug} LIKE ${'%' + team1 + '%'}`,
-                  sql`${matches.slug} LIKE ${'%' + team2 + '%'}`
+                baseWhere(
+                  and(
+                    sql`${matches.slug} LIKE ${'%' + team1 + '%'}`,
+                    sql`${matches.slug} LIKE ${'%' + team2 + '%'}`
+                  )
                 )
               )
               .limit(1);
@@ -943,15 +958,6 @@ const syncMatchesCore = async () => {
 
       if (matchedSubcat) {
         subcategoryId = matchedSubcat.id;
-        if (!matchedSubcat.status) {
-          matchedSubcat.status = true;
-          try {
-            await db
-              .update(sportsSubcategories)
-              .set({ status: true })
-              .where(eq(sportsSubcategories.id, matchedSubcat.id));
-          } catch (e) {}
-        }
       }
     }
 
@@ -1055,45 +1061,15 @@ const syncMatchesCore = async () => {
     addedCount++;
   }
 
-  const startOfTodayFilter = new Date(now);
-  startOfTodayFilter.setHours(0, 0, 0, 0);
-  const endOfTomorrowFilter = new Date(now);
-  endOfTomorrowFilter.setDate(endOfTomorrowFilter.getDate() + 1);
-  endOfTomorrowFilter.setHours(23, 59, 59, 999);
-
-  // Auto ON/OFF subcategories based on whether they currently have live/upcoming matches for TODAY & TOMORROW ONLY
-  const currentActiveMatches = await db
-    .select({ subcategoryId: matches.subcategoryId })
-    .from(matches)
-    .where(
-      and(
-        ne(matches.status, 'finished'),
-        gte(matches.matchTime, startOfTodayFilter),
-        lte(matches.matchTime, endOfTomorrowFilter)
-      )
-    );
-
-  const activeSubcatIdsInDb = new Set(
-    currentActiveMatches.map((m) => m.subcategoryId).filter(Boolean)
-  );
-
-  const allSubcategories = await db
-    .select({ id: sportsSubcategories.id, status: sportsSubcategories.status })
-    .from(sportsSubcategories);
-
-  let turnedOnCount = 0;
-  let turnedOffCount = 0;
-
-  for (const subcat of allSubcategories) {
-    const shouldBeOn = activeSubcatIdsInDb.has(subcat.id);
-    if (Boolean(subcat.status) !== shouldBeOn) {
-      await db
-        .update(sportsSubcategories)
-        .set({ status: shouldBeOn })
-        .where(eq(sportsSubcategories.id, subcat.id));
-
-      if (shouldBeOn) turnedOnCount++;
-      else turnedOffCount++;
+  // Auto turn ON subcategories that have live/upcoming matches in this sync batch
+  if (activeSubcategoryIds.size > 0) {
+    for (const subcatId of activeSubcategoryIds) {
+      try {
+        await db
+          .update(sportsSubcategories)
+          .set({ status: true })
+          .where(eq(sportsSubcategories.id, subcatId));
+      } catch (e) {}
     }
   }
 
@@ -1101,9 +1077,6 @@ const syncMatchesCore = async () => {
     added: addedCount,
     preserved: preservedCount,
     deleted: deletedCount,
-    activeSubcategoriesTotal: activeSubcatIdsInDb.size,
-    turnedOnSubcategories: turnedOnCount,
-    turnedOffSubcategories: turnedOffCount,
     totalFetched: rawEvents.length,
   };
 };

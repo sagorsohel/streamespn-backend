@@ -29,7 +29,7 @@ const ensureTableExists = async () => {
 const getSubcategories = async (req, res, next) => {
   try {
     await ensureTableExists();
-    const { categoryId, trending } = req.query;
+    const { categoryId, trending, status, activeOnly, all, admin } = req.query;
 
     let query = db
       .select({
@@ -55,6 +55,16 @@ const getSubcategories = async (req, res, next) => {
     }
     if (trending === 'true' || trending === '1') {
       conditions.push(eq(sportsSubcategories.isTrending, true));
+    }
+
+    const showAll = all === 'true' || all === '1' || admin === 'true';
+
+    if (status !== undefined) {
+      const statusBool = status === 'true' || status === '1';
+      conditions.push(eq(sportsSubcategories.status, statusBool));
+    } else if (activeOnly === 'true' || activeOnly === '1' || !showAll) {
+      // By default for public website calls (when all is not passed), ONLY return active subcategories (status = true)
+      conditions.push(eq(sportsSubcategories.status, true));
     }
 
     if (conditions.length > 0) {
