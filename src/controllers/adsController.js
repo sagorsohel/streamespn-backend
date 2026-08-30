@@ -31,10 +31,25 @@ const ensureTableExists = async () => {
   connection.release();
 };
 
+let cachedAdsSettings = null;
+let isTableInitialized = false;
+
 // GET Ads & Referral Settings
 const getAdsSettings = async (req, res, next) => {
   try {
-    await ensureTableExists();
+    if (cachedAdsSettings) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          settings: cachedAdsSettings,
+        },
+      });
+    }
+
+    if (!isTableInitialized) {
+      await ensureTableExists();
+      isTableInitialized = true;
+    }
 
     const result = await db
       .select()
@@ -55,6 +70,8 @@ const getAdsSettings = async (req, res, next) => {
       globalSignInReferralLink: '',
     };
 
+    cachedAdsSettings = settings;
+
     return res.status(200).json({
       success: true,
       data: {
@@ -69,7 +86,10 @@ const getAdsSettings = async (req, res, next) => {
 // UPDATE Ads & Referral Settings
 const updateAdsSettings = async (req, res, next) => {
   try {
-    await ensureTableExists();
+    if (!isTableInitialized) {
+      await ensureTableExists();
+      isTableInitialized = true;
+    }
 
     const {
       headAds,
@@ -103,6 +123,8 @@ const updateAdsSettings = async (req, res, next) => {
       .from(adsSettings)
       .where(eq(adsSettings.id, 1))
       .limit(1);
+
+    cachedAdsSettings = updated[0];
 
     return res.status(200).json({
       success: true,
