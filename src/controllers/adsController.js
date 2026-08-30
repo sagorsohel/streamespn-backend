@@ -34,6 +34,27 @@ const ensureTableExists = async () => {
 let cachedAdsSettings = null;
 let isTableInitialized = false;
 
+// DEDICATED ULTRA-FAST ADS ENDPOINT (0ms RAM response)
+const getAdsFast = (req, res) => {
+  return res.status(200).json({
+    success: true,
+    data: {
+      settings: cachedAdsSettings || {
+        id: 1,
+        headAds: '',
+        navAds: '',
+        modalSignupAds: '',
+        footerAds: '',
+        floatMobileAds: '',
+        floatDesktopAds: '',
+        histatsScript: '',
+        membershipReferralLink: '',
+        globalSignInReferralLink: '',
+      },
+    },
+  });
+};
+
 // GET Ads & Referral Settings
 const getAdsSettings = async (req, res, next) => {
   try {
@@ -139,6 +160,7 @@ const updateAdsSettings = async (req, res, next) => {
 };
 
 module.exports = {
+  getAdsFast,
   getAdsSettings,
   updateAdsSettings,
 };
