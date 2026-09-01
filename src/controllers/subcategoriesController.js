@@ -1,7 +1,7 @@
-const { eq, asc, and } = require('drizzle-orm');
+const { eq, asc, desc, and, or, sql } = require('drizzle-orm');
 const axios = require('axios');
 const { db, pool, ensureDatabaseExists } = require('../db');
-const { sportsSubcategories, sportsCategories } = require('../db/schema');
+const { sportsSubcategories, sportsCategories, matches } = require('../db/schema');
 const { SPORTSDB_API_KEY } = require('../services/sportsDbService');
 
 // Helper to ensure sports_subcategories table exists
@@ -31,6 +31,10 @@ const getSubcategories = async (req, res, next) => {
     await ensureTableExists();
     const { categoryId, trending, status, activeOnly, all, admin } = req.query;
 
+    const matchCountExpr = sql`CAST(COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} != 'finished' OR ${matches.status} IS NULL) THEN 1 ELSE NULL END) AS UNSIGNED)`;
+    const liveMatchCountExpr = sql`CAST(COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} = 'live' THEN 1 ELSE NULL END) AS UNSIGNED)`;
+    const totalMatchCountExpr = sql`CAST(COUNT(${matches.id}) AS UNSIGNED)`;
+
     let query = db
       .select({
         id: sportsSubcategories.id,
@@ -44,17 +48,31 @@ const getSubcategories = async (req, res, next) => {
         createdAt: sportsSubcategories.createdAt,
         updatedAt: sportsSubcategories.updatedAt,
         categoryName: sportsCategories.sportName,
+        matchCount: matchCountExpr,
+        liveMatchCount: liveMatchCountExpr,
+        totalMatchCount: totalMatchCountExpr,
       })
       .from(sportsSubcategories)
-      .leftJoin(sportsCategories, eq(sportsSubcategories.categoryId, sportsCategories.id));
+      .leftJoin(sportsCategories, eq(sportsSubcategories.categoryId, sportsCategories.id))
+      .leftJoin(matches, eq(sportsSubcategories.id, matches.subcategoryId))
+      .groupBy(
+        sportsSubcategories.id,
+        sportsSubcategories.categoryId,
+        sportsSubcategories.name,
+        sportsSubcategories.logoUrl,
+        sportsSubcategories.status,
+        sportsSubcategories.isTrending,
+        sportsSubcategories.displayOrder,
+        sportsSubcategories.isCustomized,
+        sportsSubcategories.createdAt,
+        sportsSubcategories.updatedAt,
+        sportsCategories.sportName
+      );
 
     const conditions = [];
 
     if (categoryId) {
       conditions.push(eq(sportsSubcategories.categoryId, Number(categoryId)));
-    }
-    if (trending === 'true' || trending === '1') {
-      conditions.push(eq(sportsSubcategories.isTrending, true));
     }
 
     const showAll = all === 'true' || all === '1' || admin === 'true';
@@ -71,7 +89,63 @@ const getSubcategories = async (req, res, next) => {
       query = query.where(and(...conditions));
     }
 
-    const results = await query.orderBy(asc(sportsSubcategories.displayOrder));
+    if (trending === 'true' || trending === '1') {
+      const minMatches = req.query.minMatches !== undefined ? Number(req.query.minMatches) : 10;
+      // Trending/Featured subcategories:
+      // Either manually marked as trending (is_trending = 1) OR automatically trending by having >= 10 active matches
+      query = query.having(
+        or(
+          eq(sportsSubcategories.isTrending, true),
+          sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} != 'finished' OR ${matches.status} IS NULL) THEN 1 ELSE NULL END) >= ${minMatches}`
+        )
+      );
+
+      // Order by: Manually pinned (isTrending DESC), then highest active matches (matchCount DESC), live matches, displayOrder, name
+      query = query.orderBy(
+        desc(sportsSubcategories.isTrending),
+        desc(matchCountExpr),
+        desc(liveMatchCountExpr),
+        asc(sportsSubcategories.displayOrder),
+        asc(sportsSubcategories.name)
+      );
+    } else {
+      // General listing order: highest active matches first, then displayOrder, then name
+      query = query.orderBy(
+        desc(matchCountExpr),
+        asc(sportsSubcategories.displayOrder),
+        asc(sportsSubcategories.name)
+      );
+    }
+
+    let results = await query;
+
+    // Fallback for trending if no subcategories have matches and none are manually marked trending:
+    if ((trending === 'true' || trending === '1') && results.length === 0) {
+      const fallbackQuery = db
+        .select({
+          id: sportsSubcategories.id,
+          categoryId: sportsSubcategories.categoryId,
+          name: sportsSubcategories.name,
+          logoUrl: sportsSubcategories.logoUrl,
+          status: sportsSubcategories.status,
+          isTrending: sportsSubcategories.isTrending,
+          displayOrder: sportsSubcategories.displayOrder,
+          isCustomized: sportsSubcategories.isCustomized,
+          createdAt: sportsSubcategories.createdAt,
+          updatedAt: sportsSubcategories.updatedAt,
+          categoryName: sportsCategories.sportName,
+          matchCount: sql`0`,
+          liveMatchCount: sql`0`,
+          totalMatchCount: sql`0`,
+        })
+        .from(sportsSubcategories)
+        .leftJoin(sportsCategories, eq(sportsSubcategories.categoryId, sportsCategories.id))
+        .where(eq(sportsSubcategories.status, true))
+        .orderBy(asc(sportsSubcategories.displayOrder), asc(sportsSubcategories.name))
+        .limit(15);
+
+      results = await fallbackQuery;
+    }
 
     return res.status(200).json({
       success: true,
