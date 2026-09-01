@@ -34,9 +34,27 @@ const ensureTableExists = async () => {
 let cachedAdsSettings = null;
 let isTableInitialized = false;
 
+// Warm up RAM cache on server startup — so /ads/fast always has data
+const warmUpAdsCache = async () => {
+  try {
+    await ensureTableExists();
+    isTableInitialized = true;
+    const result = await db.select().from(adsSettings).where(eq(adsSettings.id, 1)).limit(1);
+    if (result[0]) {
+      cachedAdsSettings = result[0];
+      console.log('[AdsController] RAM cache warmed up successfully.');
+    }
+  } catch (e) {
+    console.warn('[AdsController] Warm-up failed (non-critical):', e.message);
+  }
+};
+
+// Auto warm-up on module load (non-blocking)
+warmUpAdsCache();
+
 // DEDICATED ULTRA-FAST ADS ENDPOINT (0ms RAM response + Browser HTTP Cache)
 const getAdsFast = (req, res) => {
-  res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   return res.status(200).json({
     success: true,
     data: {
