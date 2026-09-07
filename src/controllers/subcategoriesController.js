@@ -1,4 +1,4 @@
-const { eq, asc, desc, and, or, sql } = require('drizzle-orm');
+const { eq, asc, desc, and, or, sql, inArray } = require('drizzle-orm');
 const axios = require('axios');
 const { db, pool, ensureDatabaseExists } = require('../db');
 const { sportsSubcategories, sportsCategories, matches } = require('../db/schema');
@@ -275,6 +275,15 @@ const updateSubcategory = async (req, res, next) => {
       })
       .where(eq(sportsSubcategories.id, Number(id)));
 
+    // When admin disables a subcategory, delete its matches so neither the subcat nor its events show on the website
+    if (status !== undefined && !Boolean(status)) {
+      try {
+        await db.delete(matches).where(eq(matches.subcategoryId, Number(id)));
+      } catch (delErr) {
+        console.error('Error removing matches for disabled subcategory:', delErr.message);
+      }
+    }
+
     const updated = await db
       .select()
       .from(sportsSubcategories)
@@ -321,6 +330,17 @@ const toggleSubcategoryStatus = async (req, res, next) => {
         isCustomized: true,
       })
       .where(eq(sportsSubcategories.id, Number(id)));
+
+    // When admin permanently disables a subcategory (status = false):
+    // Delete any existing matches for this disabled subcategory from matches table
+    // so they will immediately not show anywhere on website or DB!
+    if (!newStatus) {
+      try {
+        await db.delete(matches).where(eq(matches.subcategoryId, Number(id)));
+      } catch (delErr) {
+        console.error('Error removing matches for disabled subcategory:', delErr.message);
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -484,6 +504,55 @@ const syncSubcategories = async (req, res, next) => {
   }
 };
 
+// Bulk Update Subcategory Status (Enable All or Disable All by Category or IDs)
+const bulkUpdateSubcategoryStatus = async (req, res, next) => {
+  try {
+    await ensureTableExists();
+    const { categoryId, ids, status } = req.body;
+    const targetStatus = Boolean(status);
+
+    let whereClause;
+    if (Array.isArray(ids) && ids.length > 0) {
+      whereClause = inArray(sportsSubcategories.id, ids.map(Number));
+    } else if (categoryId && categoryId !== 'all') {
+      whereClause = eq(sportsSubcategories.categoryId, Number(categoryId));
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide categoryId or ids array.',
+      });
+    }
+
+    await db
+      .update(sportsSubcategories)
+      .set({
+        status: targetStatus,
+        isCustomized: true,
+      })
+      .where(whereClause);
+
+    // If disabling, delete matches for these subcategories so website & DB are clean
+    if (!targetStatus) {
+      try {
+        if (Array.isArray(ids) && ids.length > 0) {
+          await db.delete(matches).where(inArray(matches.subcategoryId, ids.map(Number)));
+        } else if (categoryId && categoryId !== 'all') {
+          await db.delete(matches).where(eq(matches.categoryId, Number(categoryId)));
+        }
+      } catch (delErr) {
+        console.error('Error deleting matches on bulk disable:', delErr.message);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Subcategories successfully ${targetStatus ? 'enabled (ON)' : 'disabled (OFF)'}.`,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getSubcategories,
   getSubcategoryById,
@@ -493,4 +562,5 @@ module.exports = {
   toggleSubcategoryTrending,
   deleteSubcategory,
   syncSubcategories,
+  bulkUpdateSubcategoryStatus,
 };

@@ -934,6 +934,13 @@ const syncMatchesCore = async () => {
       const lowerLeague = leagueName.toLowerCase();
       let matchedSubcat = subcategoryMap.get(lowerLeague);
 
+      // 🛑 Permanent Admin Disable Protection:
+      // If this subcategory was disabled (status = false/0) by admin:
+      // DO NOT sync or import matches for it until admin explicitly enables it!
+      if (matchedSubcat && (matchedSubcat.status === false || matchedSubcat.status === 0)) {
+        continue;
+      }
+
       if (!matchedSubcat) {
         try {
           const [subResult] = await db.insert(sportsSubcategories).values({
@@ -941,14 +948,14 @@ const syncMatchesCore = async () => {
             name: leagueName,
             logoUrl: ev.strBadge || ev.strPoster || ev.strLogo || null,
             description: null,
-            status: true,
+            status: false,
           });
 
           matchedSubcat = {
             id: subResult.insertId,
             categoryId: categoryId,
             name: leagueName,
-            status: true,
+            status: false,
           };
           subcategoryMap.set(lowerLeague, matchedSubcat);
         } catch (subErr) {
@@ -1059,18 +1066,6 @@ const syncMatchesCore = async () => {
     });
 
     addedCount++;
-  }
-
-  // Auto turn ON subcategories that have live/upcoming matches in this sync batch
-  if (activeSubcategoryIds.size > 0) {
-    for (const subcatId of activeSubcategoryIds) {
-      try {
-        await db
-          .update(sportsSubcategories)
-          .set({ status: true })
-          .where(eq(sportsSubcategories.id, subcatId));
-      } catch (e) {}
-    }
   }
 
   return {
