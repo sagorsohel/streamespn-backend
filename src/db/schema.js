@@ -71,6 +71,7 @@ const matches = mysqlTable('matches', {
 const adsSettings = mysqlTable('ads_settings', {
   id: serial('id').primaryKey(),
   headAds: text('head_ads'),
+  isHeadAdsEnabled: boolean('is_head_ads_enabled').default(true).notNull(),
   navAds: text('nav_ads'),
   modalSignupAds: text('modal_signup_ads'),
   footerAds: text('footer_ads'),

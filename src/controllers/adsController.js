@@ -18,9 +18,20 @@ const ensureTableExists = async () => {
       \`histats_script\` TEXT,
       \`membership_referral_link\` TEXT,
       \`global_sign_in_referral_link\` TEXT,
+      \`is_head_ads_enabled\` TINYINT(1) NOT NULL DEFAULT 1,
       \`updated_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
+
+  // Ensure column is_head_ads_enabled exists
+  try {
+    const [cols] = await connection.query(`SHOW COLUMNS FROM \`ads_settings\` LIKE 'is_head_ads_enabled';`);
+    if (cols.length === 0) {
+      await connection.query(`ALTER TABLE \`ads_settings\` ADD COLUMN \`is_head_ads_enabled\` TINYINT(1) NOT NULL DEFAULT 1;`);
+    }
+  } catch (e) {
+    // column might already exist
+  }
 
   // Ensure row ID 1 exists
   const [rows] = await connection.query(`SELECT * FROM \`ads_settings\` WHERE \`id\` = 1;`);
@@ -61,6 +72,7 @@ const getAdsFast = (req, res) => {
       settings: cachedAdsSettings || {
         id: 1,
         headAds: '',
+        isHeadAdsEnabled: true,
         navAds: '',
         modalSignupAds: '',
         footerAds: '',
@@ -133,6 +145,7 @@ const updateAdsSettings = async (req, res, next) => {
 
     const {
       headAds,
+      isHeadAdsEnabled,
       navAds,
       modalSignupAds,
       footerAds,
@@ -147,6 +160,7 @@ const updateAdsSettings = async (req, res, next) => {
       .update(adsSettings)
       .set({
         headAds: headAds !== undefined ? headAds : '',
+        isHeadAdsEnabled: isHeadAdsEnabled !== undefined ? Boolean(isHeadAdsEnabled) : true,
         navAds: navAds !== undefined ? navAds : '',
         modalSignupAds: modalSignupAds !== undefined ? modalSignupAds : '',
         footerAds: footerAds !== undefined ? footerAds : '',
