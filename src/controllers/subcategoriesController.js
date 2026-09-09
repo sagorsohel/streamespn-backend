@@ -16,12 +16,22 @@ const ensureTableExists = async () => {
       \`logo_url\` TEXT,
       \`status\` TINYINT(1) NOT NULL DEFAULT 0,
       \`is_trending\` TINYINT(1) NOT NULL DEFAULT 0,
+      \`is_home_banner\` TINYINT(1) NOT NULL DEFAULT 0,
       \`display_order\` INT NOT NULL DEFAULT 0,
       \`is_customized\` TINYINT(1) NOT NULL DEFAULT 0,
       \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       \`updated_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
+
+  try {
+    await connection.query(`
+      ALTER TABLE \`sports_subcategories\` ADD COLUMN \`is_home_banner\` TINYINT(1) NOT NULL DEFAULT 0;
+    `);
+  } catch (err) {
+    // Column already exists
+  }
+
   connection.release();
 };
 
@@ -43,6 +53,7 @@ const getSubcategories = async (req, res, next) => {
         logoUrl: sportsSubcategories.logoUrl,
         status: sportsSubcategories.status,
         isTrending: sportsSubcategories.isTrending,
+        isHomeBanner: sportsSubcategories.isHomeBanner,
         displayOrder: sportsSubcategories.displayOrder,
         isCustomized: sportsSubcategories.isCustomized,
         createdAt: sportsSubcategories.createdAt,
@@ -62,6 +73,7 @@ const getSubcategories = async (req, res, next) => {
         sportsSubcategories.logoUrl,
         sportsSubcategories.status,
         sportsSubcategories.isTrending,
+        sportsSubcategories.isHomeBanner,
         sportsSubcategories.displayOrder,
         sportsSubcategories.isCustomized,
         sportsSubcategories.createdAt,
@@ -270,6 +282,7 @@ const updateSubcategory = async (req, res, next) => {
         logoUrl: logoUrl !== undefined ? logoUrl : existing[0].logoUrl,
         status: status !== undefined ? Boolean(status) : existing[0].status,
         isTrending: isTrending !== undefined ? Boolean(isTrending) : existing[0].isTrending,
+        isHomeBanner: isHomeBanner !== undefined ? Boolean(isHomeBanner) : existing[0].isHomeBanner,
         displayOrder: displayOrder !== undefined ? Number(displayOrder) : existing[0].displayOrder,
         isCustomized: true,
       })
@@ -390,6 +403,48 @@ const toggleSubcategoryTrending = async (req, res, next) => {
       data: {
         id: Number(id),
         isTrending: newTrending,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Toggle Home Banner Status (is_home_banner = true / false)
+const toggleSubcategoryBanner = async (req, res, next) => {
+  try {
+    await ensureTableExists();
+    const { id } = req.params;
+
+    const existing = await db
+      .select()
+      .from(sportsSubcategories)
+      .where(eq(sportsSubcategories.id, Number(id)))
+      .limit(1);
+
+    if (existing.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Subcategory with ID ${id} not found.`,
+      });
+    }
+
+    const newBanner = !existing[0].isHomeBanner;
+
+    await db
+      .update(sportsSubcategories)
+      .set({
+        isHomeBanner: newBanner,
+        isCustomized: true,
+      })
+      .where(eq(sportsSubcategories.id, Number(id)));
+
+    return res.status(200).json({
+      success: true,
+      message: `Subcategory "${existing[0].name}" home banner set to ${newBanner ? 'ON ⭐ (Shown in Home Banner Carousel)' : 'OFF (Normal)'}.`,
+      data: {
+        id: Number(id),
+        isHomeBanner: newBanner,
       },
     });
   } catch (error) {
@@ -560,6 +615,7 @@ module.exports = {
   updateSubcategory,
   toggleSubcategoryStatus,
   toggleSubcategoryTrending,
+  toggleSubcategoryBanner,
   deleteSubcategory,
   syncSubcategories,
   bulkUpdateSubcategoryStatus,

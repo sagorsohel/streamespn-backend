@@ -1,4 +1,4 @@
-const { eq, ne, gte, lte, lt, asc, desc, and, or, isNull, sql } = require('drizzle-orm');
+const { eq, ne, gte, lte, lt, asc, desc, and, or, isNull, sql, inArray } = require('drizzle-orm');
 const axios = require('axios');
 const { db, pool, ensureDatabaseExists } = require('../db');
 const { matches, sportsCategories, sportsSubcategories } = require('../db/schema');
@@ -107,6 +107,10 @@ const ensureTableExists = async () => {
 
   try {
     await connection.query(`ALTER TABLE \`matches\` ADD COLUMN \`live_minute\` VARCHAR(50);`);
+  } catch (e) {}
+
+  try {
+    await connection.query(`ALTER TABLE \`sports_subcategories\` ADD COLUMN \`is_home_banner\` TINYINT(1) NOT NULL DEFAULT 0;`);
   } catch (e) {}
 
   try {
@@ -264,6 +268,149 @@ const getMatches = async (req, res, next) => {
       data: {
         matches: results,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get Matches for Home Page Featured Hero Banner Carousel
+const getBannerMatches = async (req, res, next) => {
+  try {
+    await ensureTableExists();
+
+    const selectFields = {
+      id: matches.id,
+      sportsdbEventId: matches.sportsdbEventId,
+      categoryId: matches.categoryId,
+      subcategoryId: matches.subcategoryId,
+      matchType: matches.matchType,
+      slug: matches.slug,
+      title: matches.title,
+      homeTeam: matches.homeTeam,
+      homeTeamLogo: matches.homeTeamLogo,
+      awayTeam: matches.awayTeam,
+      awayTeamLogo: matches.awayTeamLogo,
+      homeScore: matches.homeScore,
+      awayScore: matches.awayScore,
+      livePeriod: matches.livePeriod,
+      liveMinute: matches.liveMinute,
+      matchTime: matches.matchTime,
+      status: matches.status,
+      venue: matches.venue,
+      playerImage: matches.playerImage,
+      bgImage: matches.bgImage,
+      referralLink: matches.referralLink,
+      displayOrder: matches.displayOrder,
+      isCustomized: matches.isCustomized,
+      createdAt: matches.createdAt,
+      updatedAt: matches.updatedAt,
+      categoryName: sportsCategories.sportName,
+      categoryLogo: sportsCategories.iconUrl,
+      categoryPlayerImage: sportsCategories.playerImage,
+      categoryThumbUrl: sportsCategories.thumbUrl,
+      categoryReferralLink: sportsCategories.referralLink,
+      subcategoryName: sportsSubcategories.name,
+      subcategoryLogo: sportsSubcategories.logoUrl,
+    };
+
+    const statusOrder = sql`CASE 
+      WHEN ${matches.status} = 'live' THEN 1 
+      WHEN ${matches.status} = 'upcoming' THEN 2 
+      ELSE 3 
+    END`;
+
+    // 1. Check if any subcategory has isHomeBanner = true and status = true
+    const bannerSubcats = await db
+      .select({ id: sportsSubcategories.id })
+      .from(sportsSubcategories)
+      .where(and(eq(sportsSubcategories.isHomeBanner, true), eq(sportsSubcategories.status, true)));
+
+    if (bannerSubcats.length > 0) {
+      const bannerSubcatIds = bannerSubcats.map((s) => s.id);
+      const bannerMatches = await db
+        .select(selectFields)
+        .from(matches)
+        .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
+        .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
+        .where(
+          and(
+            inArray(matches.subcategoryId, bannerSubcatIds),
+            ne(matches.status, 'finished')
+          )
+        )
+        .orderBy(statusOrder, asc(matches.matchTime))
+        .limit(10);
+
+      if (bannerMatches.length > 0) {
+        return res.status(200).json({
+          success: true,
+          source: 'manual_banner',
+          count: bannerMatches.length,
+          data: { matches: bannerMatches },
+        });
+      }
+    }
+
+    // 2. Fallback: If no subcategory is marked for banner (or has 0 active matches)
+    // Find subcategories with matchCount >= 10, or highest active match count
+    const topSubcatsWithMatches = await db
+      .select({
+        id: sportsSubcategories.id,
+      })
+      .from(sportsSubcategories)
+      .leftJoin(matches, eq(sportsSubcategories.id, matches.subcategoryId))
+      .where(eq(sportsSubcategories.status, true))
+      .groupBy(sportsSubcategories.id)
+      .having(sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} != 'finished' THEN 1 ELSE NULL END) >= 10`)
+      .orderBy(desc(sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} != 'finished' THEN 1 ELSE NULL END)`));
+
+    if (topSubcatsWithMatches.length > 0) {
+      const topIds = topSubcatsWithMatches.map((s) => s.id);
+      const matchesFromTop = await db
+        .select(selectFields)
+        .from(matches)
+        .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
+        .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
+        .where(
+          and(
+            inArray(matches.subcategoryId, topIds),
+            ne(matches.status, 'finished')
+          )
+        )
+        .orderBy(statusOrder, asc(matches.matchTime))
+        .limit(10);
+
+      if (matchesFromTop.length > 0) {
+        return res.status(200).json({
+          success: true,
+          source: 'top_leagues_fallback',
+          count: matchesFromTop.length,
+          data: { matches: matchesFromTop },
+        });
+      }
+    }
+
+    // 3. Ultimate Fallback: Top 10 live or upcoming matches overall
+    const fallbackMatches = await db
+      .select(selectFields)
+      .from(matches)
+      .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
+      .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
+      .where(
+        and(
+          ne(matches.status, 'finished'),
+          or(isNull(matches.subcategoryId), eq(sportsSubcategories.status, true))
+        )
+      )
+      .orderBy(statusOrder, asc(matches.matchTime))
+      .limit(10);
+
+    return res.status(200).json({
+      success: true,
+      source: 'general_fallback',
+      count: fallbackMatches.length,
+      data: { matches: fallbackMatches },
     });
   } catch (error) {
     next(error);
@@ -1139,6 +1286,7 @@ const deleteAllMatches = async (req, res, next) => {
 
 module.exports = {
   getMatches,
+  getBannerMatches,
   getLiveScores,
   getMatchById,
   createMatch,

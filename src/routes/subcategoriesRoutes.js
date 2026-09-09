@@ -6,6 +6,7 @@ const {
   updateSubcategory,
   toggleSubcategoryStatus,
   toggleSubcategoryTrending,
+  toggleSubcategoryBanner,
   deleteSubcategory,
   syncSubcategories,
   bulkUpdateSubcategoryStatus,
@@ -21,6 +22,7 @@ router.post('/sync', verifyToken, syncSubcategories);
 router.post('/bulk-status', verifyToken, bulkUpdateSubcategoryStatus);
 router.patch('/:id/toggle', verifyToken, toggleSubcategoryStatus);
 router.patch('/:id/toggle-trending', verifyToken, toggleSubcategoryTrending);
+router.patch('/:id/toggle-banner', verifyToken, toggleSubcategoryBanner);
 router.put('/:id', verifyToken, updateSubcategory);
 router.delete('/:id', verifyToken, deleteSubcategory);
 

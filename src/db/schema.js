@@ -33,6 +33,7 @@ const sportsSubcategories = mysqlTable('sports_subcategories', {
   logoUrl: text('logo_url'),
   status: boolean('status').default(false).notNull(), // Default OFF (false)
   isTrending: boolean('is_trending').default(false).notNull(), // Default OFF (false)
+  isHomeBanner: boolean('is_home_banner').default(false).notNull(), // Default OFF (false)
   displayOrder: int('display_order').default(0).notNull(),
   isCustomized: boolean('is_customized').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
