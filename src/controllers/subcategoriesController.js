@@ -512,7 +512,7 @@ const syncSubcategories = async (req, res, next) => {
     const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/search_all_leagues.php?s=${encodeURIComponent(sportName)}`;
     
     const apiRes = await axios.get(url);
-    const leagues = apiRes.data?.countrys || apiRes.data?.leagues || [];
+    const leagues = apiRes.data?.countries || apiRes.data?.countrys || apiRes.data?.leagues || [];
 
     if (!Array.isArray(leagues) || leagues.length === 0) {
       return res.status(200).json({
