@@ -9,6 +9,7 @@ const {
   toggleSubcategoryBanner,
   deleteSubcategory,
   syncSubcategories,
+  syncAllSubcategoryBadges,
   bulkUpdateSubcategoryStatus,
 } = require('../controllers/subcategoriesController');
 const { verifyToken } = require('../middleware/auth');
@@ -19,6 +20,7 @@ router.get('/', getSubcategories);
 router.get('/:id', getSubcategoryById);
 router.post('/', verifyToken, createSubcategory);
 router.post('/sync', verifyToken, syncSubcategories);
+router.post('/sync-all-badges', verifyToken, syncAllSubcategoryBadges);
 router.post('/bulk-status', verifyToken, bulkUpdateSubcategoryStatus);
 router.patch('/:id/toggle', verifyToken, toggleSubcategoryStatus);
 router.patch('/:id/toggle-trending', verifyToken, toggleSubcategoryTrending);

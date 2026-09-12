@@ -527,19 +527,33 @@ const syncSubcategories = async (req, res, next) => {
       .from(sportsSubcategories)
       .where(eq(sportsSubcategories.categoryId, Number(categoryId)));
 
-    const existingNames = new Set(existingSubcategories.map((s) => s.name.toLowerCase()));
+    const existingMap = new Map(existingSubcategories.map((s) => [s.name.toLowerCase().trim(), s]));
     let syncedCount = 0;
+    let updatedLogosCount = 0;
 
     for (const league of leagues) {
-      const name = league.strLeague;
-      if (!name || existingNames.has(name.toLowerCase())) continue;
+      const name = league.strLeague?.trim();
+      if (!name) continue;
 
-      const logoUrl = league.strBadge || league.strLogo || league.strPoster || null;
+      const badgeLogo = league.strBadge || league.strLogo || null;
+      const lowerName = name.toLowerCase();
+
+      if (existingMap.has(lowerName)) {
+        const existing = existingMap.get(lowerName);
+        if (badgeLogo && (!existing.logoUrl || existing.logoUrl.includes('/event/poster/') || existing.logoUrl !== badgeLogo)) {
+          await db
+            .update(sportsSubcategories)
+            .set({ logoUrl: badgeLogo })
+            .where(eq(sportsSubcategories.id, existing.id));
+          updatedLogosCount++;
+        }
+        continue;
+      }
 
       await db.insert(sportsSubcategories).values({
         categoryId: Number(categoryId),
-        name: name.trim(),
-        logoUrl: logoUrl,
+        name: name,
+        logoUrl: badgeLogo,
         status: false, // Default OFF
         isTrending: false, // Default OFF
         displayOrder: existingSubcategories.length + syncedCount + 1,
@@ -551,8 +565,8 @@ const syncSubcategories = async (req, res, next) => {
 
     return res.status(200).json({
       success: true,
-      message: `Successfully synced ${syncedCount} new subcategories for "${sportName}".`,
-      data: { syncedCount },
+      message: `Successfully processed "${sportName}": ${syncedCount} new subcategories added, ${updatedLogosCount} subcategory badges updated.`,
+      data: { syncedCount, updatedLogosCount },
     });
   } catch (error) {
     next(error);
@@ -608,6 +622,62 @@ const bulkUpdateSubcategoryStatus = async (req, res, next) => {
   }
 };
 
+// Core reusable function to sync and repair all subcategory badges from TheSportsDB
+const syncAllSubcategoryBadgesCore = async () => {
+  await ensureTableExists();
+  const categories = await db.select().from(sportsCategories);
+  const subcats = await db.select().from(sportsSubcategories);
+
+  const subcatMap = new Map();
+  subcats.forEach((s) => subcatMap.set(s.name.toLowerCase().trim(), s));
+
+  let updatedCount = 0;
+
+  for (const cat of categories) {
+    try {
+      const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/search_all_leagues.php?s=${encodeURIComponent(cat.sportName)}`;
+      const apiRes = await axios.get(url, { timeout: 10000 });
+      const list = apiRes.data?.countries || apiRes.data?.countrys || apiRes.data?.leagues || [];
+
+      for (const item of list) {
+        const leagueName = item.strLeague?.trim();
+        if (!leagueName) continue;
+
+        const badgeLogo = item.strBadge || item.strLogo || null;
+        if (!badgeLogo) continue;
+
+        const existing = subcatMap.get(leagueName.toLowerCase());
+        if (existing && (!existing.logoUrl || existing.logoUrl.includes('/event/poster/') || existing.logoUrl !== badgeLogo)) {
+          await db
+            .update(sportsSubcategories)
+            .set({ logoUrl: badgeLogo })
+            .where(eq(sportsSubcategories.id, existing.id));
+          updatedCount++;
+          existing.logoUrl = badgeLogo;
+        }
+      }
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  return { updatedCount };
+};
+
+// Express Route Controller: Sync and Repair All Subcategory Badges
+const syncAllSubcategoryBadges = async (req, res, next) => {
+  try {
+    const result = await syncAllSubcategoryBadgesCore();
+    return res.status(200).json({
+      success: true,
+      message: `All subcategory badges synced successfully! Updated ${result.updatedCount} badges from TheSportsDB.`,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getSubcategories,
   getSubcategoryById,
@@ -618,5 +688,7 @@ module.exports = {
   toggleSubcategoryBanner,
   deleteSubcategory,
   syncSubcategories,
+  syncAllSubcategoryBadges,
+  syncAllSubcategoryBadgesCore,
   bulkUpdateSubcategoryStatus,
 };

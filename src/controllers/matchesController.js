@@ -1104,10 +1104,11 @@ const syncMatchesCore = async () => {
 
       if (!matchedSubcat) {
         try {
+          const subcatLogo = ev.strLeagueBadge || ev.strBadge || ev.strLogo || null;
           const [subResult] = await db.insert(sportsSubcategories).values({
             categoryId: categoryId,
             name: leagueName,
-            logoUrl: ev.strBadge || ev.strPoster || ev.strLogo || null,
+            logoUrl: subcatLogo,
             description: null,
             status: false,
           });
@@ -1116,6 +1117,7 @@ const syncMatchesCore = async () => {
             id: subResult.insertId,
             categoryId: categoryId,
             name: leagueName,
+            logoUrl: subcatLogo,
             status: false,
           };
           subcategoryMap.set(lowerLeague, matchedSubcat);
@@ -1126,6 +1128,19 @@ const syncMatchesCore = async () => {
 
       if (matchedSubcat) {
         subcategoryId = matchedSubcat.id;
+        // If existing subcategory has no logo or has an accidental match poster, update with official strLeagueBadge
+        const leagueBadge = ev.strLeagueBadge || ev.strBadge || ev.strLogo;
+        if (leagueBadge && (!matchedSubcat.logoUrl || matchedSubcat.logoUrl.includes('/event/poster/'))) {
+          try {
+            await db
+              .update(sportsSubcategories)
+              .set({ logoUrl: leagueBadge })
+              .where(eq(sportsSubcategories.id, matchedSubcat.id));
+            matchedSubcat.logoUrl = leagueBadge;
+          } catch (updateErr) {
+            // ignore
+          }
+        }
       }
     }
 

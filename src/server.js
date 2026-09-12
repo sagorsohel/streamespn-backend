@@ -16,13 +16,22 @@ const startServer = async () => {
 
     // 3. Automated Boot Migration & Match Sync (100% zero-command-line Hostinger automated sync)
     const { syncMatchesCore, startDaily12AMScheduler } = require('./controllers/matchesController');
+    const { syncAllSubcategoryBadgesCore } = require('./controllers/subcategoriesController');
+
     console.log('🔄 [BOOT] Running automatic database migration and match sync on server boot...');
     syncMatchesCore()
       .then((res) => {
         console.log('✅ [BOOT] Match sync on server boot completed successfully:', res);
+        // Verify and sync any missing or new subcategory badges in background
+        return syncAllSubcategoryBadgesCore();
+      })
+      .then((badgeRes) => {
+        if (badgeRes?.updatedCount > 0) {
+          console.log(`✅ [BOOT] Automatically verified and updated ${badgeRes.updatedCount} subcategory badges from TheSportsDB.`);
+        }
       })
       .catch((err) => {
-        console.error('⚠️ [BOOT] Match sync warning:', err.message);
+        console.error('⚠️ [BOOT] Match & badge sync warning:', err.message);
       });
 
     startDaily12AMScheduler();

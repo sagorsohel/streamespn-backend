@@ -110,6 +110,12 @@ const runFullFreshMigration = async () => {
     const syncResult = await syncMatchesCore();
     console.log('📊 [MIGRATION] Sync result:', syncResult);
 
+    // 4. Sync Official Subcategory Badges
+    console.log('🛡️ [MIGRATION] Syncing and verifying official subcategory badges from TheSportsDB...');
+    const { syncAllSubcategoryBadgesCore } = require('./src/controllers/subcategoriesController');
+    const badgeResult = await syncAllSubcategoryBadgesCore();
+    console.log('📊 [MIGRATION] Subcategory badges updated:', badgeResult);
+
     console.log('✅ [MIGRATION] Full migration and fresh import completed successfully!');
     process.exit(0);
   } catch (err) {
