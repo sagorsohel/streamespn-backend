@@ -1071,16 +1071,30 @@ const syncMatchesCore = async () => {
     const eventName = (ev.strEvent || '').trim();
     const eventDateStr = ev.dateEvent || today;
 
-    const matchedCategory = categoryMap.get(sportName.toLowerCase());
+    let matchedCategory = categoryMap.get(sportName.toLowerCase());
+    if (!matchedCategory) {
+      if (sportName.toLowerCase() === 'american football') {
+        matchedCategory = categoryMap.get('nfl') || categoryMap.get('football');
+      } else if (sportName.toLowerCase() === 'nfl') {
+        matchedCategory = categoryMap.get('american football');
+      } else if (sportName.toLowerCase() === 'soccer') {
+        matchedCategory = categoryMap.get('football');
+      }
+    }
+
+    const lowerLeague = leagueName ? leagueName.toLowerCase() : '';
+    let matchedSubcat = lowerLeague ? subcategoryMap.get(lowerLeague) : null;
+
+    if (!matchedCategory && matchedSubcat) {
+      matchedCategory = dbCategories.find((c) => c.id === matchedSubcat.categoryId);
+    }
+
     if (!matchedCategory) continue;
 
     const categoryId = matchedCategory.id;
     let subcategoryId = null;
 
     if (leagueName) {
-      const lowerLeague = leagueName.toLowerCase();
-      let matchedSubcat = subcategoryMap.get(lowerLeague);
-
       // 🛑 Permanent Admin Disable Protection:
       // If this subcategory was disabled (status = false/0) by admin:
       // DO NOT sync or import matches for it until admin explicitly enables it!
