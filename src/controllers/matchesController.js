@@ -134,7 +134,7 @@ const ensureTableExistsOnce = async () => {
 const getMatches = async (req, res, next) => {
   try {
     await ensureTableExistsOnce();
-    const { status, tab, categoryId, subcategoryId, page, limit, all, admin } = req.query;
+    const { status, tab, categoryId, subcategoryId, page, limit, all, admin, home } = req.query;
     const filterTab = tab || status;
     const showAll = all === 'true' || all === '1' || admin === 'true';
 
@@ -152,6 +152,11 @@ const getMatches = async (req, res, next) => {
     // Filter out matches of disabled subcategories for public website queries
     if (!showAll) {
       conditions.push(or(isNull(matches.subcategoryId), eq(sportsSubcategories.status, true)));
+    }
+
+    // Filter out matches whose subcategories are disabled for homepage visibility
+    if ((home === 'true' || home === '1') && !showAll) {
+      conditions.push(or(isNull(matches.subcategoryId), eq(sportsSubcategories.showOnHome, true)));
     }
 
     if (filterTab === 'live') {
@@ -235,6 +240,7 @@ const getMatches = async (req, res, next) => {
         categoryReferralLink: sportsCategories.referralLink,
         subcategoryName: sportsSubcategories.name,
         subcategoryLogo: sportsSubcategories.logoUrl,
+        subcategoryReferralLink: sportsSubcategories.referralLink,
       })
       .from(matches)
       .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
@@ -312,6 +318,7 @@ const getBannerMatches = async (req, res, next) => {
       categoryReferralLink: sportsCategories.referralLink,
       subcategoryName: sportsSubcategories.name,
       subcategoryLogo: sportsSubcategories.logoUrl,
+      subcategoryReferralLink: sportsSubcategories.referralLink,
     };
 
     const statusOrder = sql`CASE 
@@ -320,11 +327,11 @@ const getBannerMatches = async (req, res, next) => {
       ELSE 3 
     END`;
 
-    // 1. Check if any subcategory has isHomeBanner = true and status = true
+    // 1. Check if any subcategory has isHomeBanner = true, status = true, and showOnHome = true
     const bannerSubcats = await db
       .select({ id: sportsSubcategories.id })
       .from(sportsSubcategories)
-      .where(and(eq(sportsSubcategories.isHomeBanner, true), eq(sportsSubcategories.status, true)));
+      .where(and(eq(sportsSubcategories.isHomeBanner, true), eq(sportsSubcategories.status, true), eq(sportsSubcategories.showOnHome, true)));
 
     if (bannerSubcats.length > 0) {
       const bannerSubcatIds = bannerSubcats.map((s) => s.id);
@@ -360,7 +367,7 @@ const getBannerMatches = async (req, res, next) => {
       })
       .from(sportsSubcategories)
       .leftJoin(matches, eq(sportsSubcategories.id, matches.subcategoryId))
-      .where(eq(sportsSubcategories.status, true))
+      .where(and(eq(sportsSubcategories.status, true), eq(sportsSubcategories.showOnHome, true)))
       .groupBy(sportsSubcategories.id)
       .having(sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} != 'finished' THEN 1 ELSE NULL END) >= 10`)
       .orderBy(desc(sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} != 'finished' THEN 1 ELSE NULL END)`));
@@ -400,7 +407,10 @@ const getBannerMatches = async (req, res, next) => {
       .where(
         and(
           ne(matches.status, 'finished'),
-          or(isNull(matches.subcategoryId), eq(sportsSubcategories.status, true))
+          or(
+            isNull(matches.subcategoryId),
+            and(eq(sportsSubcategories.status, true), eq(sportsSubcategories.showOnHome, true))
+          )
         )
       )
       .orderBy(statusOrder, asc(matches.matchTime))
@@ -568,6 +578,7 @@ const getMatchById = async (req, res, next) => {
         categoryReferralLink: sportsCategories.referralLink,
         subcategoryName: sportsSubcategories.name,
         subcategoryLogo: sportsSubcategories.logoUrl,
+        subcategoryReferralLink: sportsSubcategories.referralLink,
       })
       .from(matches)
       .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
@@ -631,6 +642,7 @@ const getMatchById = async (req, res, next) => {
             categoryReferralLink: sportsCategories.referralLink,
             subcategoryName: sportsSubcategories.name,
             subcategoryLogo: sportsSubcategories.logoUrl,
+            subcategoryReferralLink: sportsSubcategories.referralLink,
           })
           .from(matches)
           .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
@@ -685,6 +697,7 @@ const getMatchById = async (req, res, next) => {
                 categoryReferralLink: sportsCategories.referralLink,
                 subcategoryName: sportsSubcategories.name,
                 subcategoryLogo: sportsSubcategories.logoUrl,
+                subcategoryReferralLink: sportsSubcategories.referralLink,
               })
               .from(matches)
               .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
@@ -1111,6 +1124,8 @@ const syncMatchesCore = async () => {
             logoUrl: subcatLogo,
             description: null,
             status: false,
+            showOnHome: true,
+            referralLink: null,
           });
 
           matchedSubcat = {

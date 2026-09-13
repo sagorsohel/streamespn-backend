@@ -17,6 +17,8 @@ const ensureTableExists = async () => {
       \`status\` TINYINT(1) NOT NULL DEFAULT 0,
       \`is_trending\` TINYINT(1) NOT NULL DEFAULT 0,
       \`is_home_banner\` TINYINT(1) NOT NULL DEFAULT 0,
+      \`show_on_home\` TINYINT(1) NOT NULL DEFAULT 1,
+      \`referral_link\` TEXT,
       \`display_order\` INT NOT NULL DEFAULT 0,
       \`is_customized\` TINYINT(1) NOT NULL DEFAULT 0,
       \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -32,14 +34,30 @@ const ensureTableExists = async () => {
     // Column already exists
   }
 
+  try {
+    await connection.query(`
+      ALTER TABLE \`sports_subcategories\` ADD COLUMN \`show_on_home\` TINYINT(1) NOT NULL DEFAULT 1;
+    `);
+  } catch (err) {
+    // Column already exists
+  }
+
+  try {
+    await connection.query(`
+      ALTER TABLE \`sports_subcategories\` ADD COLUMN \`referral_link\` TEXT;
+    `);
+  } catch (err) {
+    // Column already exists
+  }
+
   connection.release();
 };
 
-// Get Subcategories (optionally filtered by categoryId or trending)
+// Get Subcategories (optionally filtered by categoryId, trending, or home)
 const getSubcategories = async (req, res, next) => {
   try {
     await ensureTableExists();
-    const { categoryId, trending, status, activeOnly, all, admin } = req.query;
+    const { categoryId, trending, status, activeOnly, all, admin, home } = req.query;
 
     const matchCountExpr = sql`CAST(COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} != 'finished' OR ${matches.status} IS NULL) THEN 1 ELSE NULL END) AS UNSIGNED)`;
     const liveMatchCountExpr = sql`CAST(COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} = 'live' THEN 1 ELSE NULL END) AS UNSIGNED)`;
@@ -54,6 +72,8 @@ const getSubcategories = async (req, res, next) => {
         status: sportsSubcategories.status,
         isTrending: sportsSubcategories.isTrending,
         isHomeBanner: sportsSubcategories.isHomeBanner,
+        showOnHome: sportsSubcategories.showOnHome,
+        referralLink: sportsSubcategories.referralLink,
         displayOrder: sportsSubcategories.displayOrder,
         isCustomized: sportsSubcategories.isCustomized,
         createdAt: sportsSubcategories.createdAt,
@@ -74,6 +94,8 @@ const getSubcategories = async (req, res, next) => {
         sportsSubcategories.status,
         sportsSubcategories.isTrending,
         sportsSubcategories.isHomeBanner,
+        sportsSubcategories.showOnHome,
+        sportsSubcategories.referralLink,
         sportsSubcategories.displayOrder,
         sportsSubcategories.isCustomized,
         sportsSubcategories.createdAt,
@@ -95,6 +117,11 @@ const getSubcategories = async (req, res, next) => {
     } else if (activeOnly === 'true' || activeOnly === '1' || !showAll) {
       // By default for public website calls (when all is not passed), ONLY return active subcategories (status = true)
       conditions.push(eq(sportsSubcategories.status, true));
+    }
+
+    // Filter by Homepage visibility if home=true
+    if (home === 'true' || home === '1') {
+      conditions.push(eq(sportsSubcategories.showOnHome, true));
     }
 
     if (conditions.length > 0) {
@@ -133,6 +160,11 @@ const getSubcategories = async (req, res, next) => {
 
     // Fallback for trending if no subcategories have matches and none are manually marked trending:
     if ((trending === 'true' || trending === '1') && results.length === 0) {
+      const fallbackConditions = [eq(sportsSubcategories.status, true)];
+      if (home === 'true' || home === '1') {
+        fallbackConditions.push(eq(sportsSubcategories.showOnHome, true));
+      }
+
       const fallbackQuery = db
         .select({
           id: sportsSubcategories.id,
@@ -141,6 +173,9 @@ const getSubcategories = async (req, res, next) => {
           logoUrl: sportsSubcategories.logoUrl,
           status: sportsSubcategories.status,
           isTrending: sportsSubcategories.isTrending,
+          isHomeBanner: sportsSubcategories.isHomeBanner,
+          showOnHome: sportsSubcategories.showOnHome,
+          referralLink: sportsSubcategories.referralLink,
           displayOrder: sportsSubcategories.displayOrder,
           isCustomized: sportsSubcategories.isCustomized,
           createdAt: sportsSubcategories.createdAt,
@@ -152,7 +187,7 @@ const getSubcategories = async (req, res, next) => {
         })
         .from(sportsSubcategories)
         .leftJoin(sportsCategories, eq(sportsSubcategories.categoryId, sportsCategories.id))
-        .where(eq(sportsSubcategories.status, true))
+        .where(and(...fallbackConditions))
         .orderBy(asc(sportsSubcategories.displayOrder), asc(sportsSubcategories.name))
         .limit(15);
 
@@ -201,11 +236,11 @@ const getSubcategoryById = async (req, res, next) => {
   }
 };
 
-// Create Subcategory (Default Status: OFF, Default Trending: OFF)
+// Create Subcategory (Default Status: OFF, Default Trending: OFF, Default showOnHome: ON)
 const createSubcategory = async (req, res, next) => {
   try {
     await ensureTableExists();
-    const { categoryId, name, logoUrl, status, isTrending, displayOrder } = req.body;
+    const { categoryId, name, logoUrl, status, isTrending, isHomeBanner, showOnHome, referralLink, displayOrder } = req.body;
 
     if (!categoryId || !name) {
       return res.status(400).json({
@@ -227,6 +262,9 @@ const createSubcategory = async (req, res, next) => {
       logoUrl: logoUrl || null,
       status: status !== undefined ? Boolean(status) : false, // Default OFF
       isTrending: isTrending !== undefined ? Boolean(isTrending) : false, // Default OFF
+      isHomeBanner: isHomeBanner !== undefined ? Boolean(isHomeBanner) : false, // Default OFF
+      showOnHome: showOnHome !== undefined ? Boolean(showOnHome) : true, // Default ON (true)
+      referralLink: referralLink ? referralLink.trim() : null,
       displayOrder: displayOrder !== undefined ? Number(displayOrder) : maxOrder + 1,
       isCustomized: true,
     });
@@ -238,13 +276,16 @@ const createSubcategory = async (req, res, next) => {
       logoUrl: logoUrl || null,
       status: status !== undefined ? Boolean(status) : false,
       isTrending: isTrending !== undefined ? Boolean(isTrending) : false,
+      isHomeBanner: isHomeBanner !== undefined ? Boolean(isHomeBanner) : false,
+      showOnHome: showOnHome !== undefined ? Boolean(showOnHome) : true,
+      referralLink: referralLink ? referralLink.trim() : null,
       displayOrder: displayOrder !== undefined ? Number(displayOrder) : maxOrder + 1,
       isCustomized: true,
     };
 
     return res.status(201).json({
       success: true,
-      message: 'Subcategory created successfully (Default Status & Trending: OFF).',
+      message: 'Subcategory created successfully.',
       data: {
         subcategory: newSubcategory,
       },
@@ -259,7 +300,7 @@ const updateSubcategory = async (req, res, next) => {
   try {
     await ensureTableExists();
     const { id } = req.params;
-    const { categoryId, name, logoUrl, status, isTrending, displayOrder } = req.body;
+    const { categoryId, name, logoUrl, status, isTrending, isHomeBanner, showOnHome, referralLink, displayOrder } = req.body;
 
     const existing = await db
       .select()
@@ -283,6 +324,8 @@ const updateSubcategory = async (req, res, next) => {
         status: status !== undefined ? Boolean(status) : existing[0].status,
         isTrending: isTrending !== undefined ? Boolean(isTrending) : existing[0].isTrending,
         isHomeBanner: isHomeBanner !== undefined ? Boolean(isHomeBanner) : existing[0].isHomeBanner,
+        showOnHome: showOnHome !== undefined ? Boolean(showOnHome) : existing[0].showOnHome,
+        referralLink: referralLink !== undefined ? (referralLink ? referralLink.trim() : null) : existing[0].referralLink,
         displayOrder: displayOrder !== undefined ? Number(displayOrder) : existing[0].displayOrder,
         isCustomized: true,
       })
@@ -452,6 +495,48 @@ const toggleSubcategoryBanner = async (req, res, next) => {
   }
 };
 
+// Toggle Home Visibility Status (show_on_home = true / false)
+const toggleSubcategoryHome = async (req, res, next) => {
+  try {
+    await ensureTableExists();
+    const { id } = req.params;
+
+    const existing = await db
+      .select()
+      .from(sportsSubcategories)
+      .where(eq(sportsSubcategories.id, Number(id)))
+      .limit(1);
+
+    if (existing.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Subcategory with ID ${id} not found.`,
+      });
+    }
+
+    const newShowOnHome = !existing[0].showOnHome;
+
+    await db
+      .update(sportsSubcategories)
+      .set({
+        showOnHome: newShowOnHome,
+        isCustomized: true,
+      })
+      .where(eq(sportsSubcategories.id, Number(id)));
+
+    return res.status(200).json({
+      success: true,
+      message: `Subcategory "${existing[0].name}" homepage visibility set to ${newShowOnHome ? 'ON 🏠 (Shown on Homepage)' : 'OFF (Hidden from Homepage)'}.`,
+      data: {
+        id: Number(id),
+        showOnHome: newShowOnHome,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Delete Subcategory
 const deleteSubcategory = async (req, res, next) => {
   try {
@@ -556,6 +641,9 @@ const syncSubcategories = async (req, res, next) => {
         logoUrl: badgeLogo,
         status: false, // Default OFF
         isTrending: false, // Default OFF
+        isHomeBanner: false, // Default OFF
+        showOnHome: true, // Default ON (true)
+        referralLink: null,
         displayOrder: existingSubcategories.length + syncedCount + 1,
         isCustomized: false,
       });
@@ -686,6 +774,7 @@ module.exports = {
   toggleSubcategoryStatus,
   toggleSubcategoryTrending,
   toggleSubcategoryBanner,
+  toggleSubcategoryHome,
   deleteSubcategory,
   syncSubcategories,
   syncAllSubcategoryBadges,
