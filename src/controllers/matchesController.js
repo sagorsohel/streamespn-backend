@@ -134,6 +134,7 @@ const ensureTableExistsOnce = async () => {
 const getMatches = async (req, res, next) => {
   try {
     await ensureTableExistsOnce();
+    syncLiveScoresWithSportsDB().catch(() => {});
     const { status, tab, categoryId, subcategoryId, page, limit, all, admin, home } = req.query;
     const filterTab = tab || status;
     const showAll = all === 'true' || all === '1' || admin === 'true';
@@ -457,11 +458,20 @@ const syncLiveScoresWithSportsDB = async () => {
         statusStr.includes('q1') ||
         statusStr.includes('q2') ||
         statusStr.includes('q3') ||
-        statusStr.includes('q4')
+        statusStr.includes('q4') ||
+        statusStr.startsWith('in') ||
+        statusStr.startsWith('p1') ||
+        statusStr.startsWith('p2') ||
+        statusStr.startsWith('p3') ||
+        statusStr.includes('half') ||
+        statusStr.includes('ot') ||
+        statusStr.includes('set')
       ) {
         targetStatus = 'live';
       } else if (statusStr === 'ns' || statusStr === 'not started' || statusStr.includes('sched')) {
         targetStatus = 'upcoming';
+      } else if (item.intHomeScore !== null || item.intAwayScore !== null) {
+        targetStatus = 'live';
       }
 
       const homeScoreVal = item.intHomeScore !== null && item.intHomeScore !== undefined ? String(item.intHomeScore) : null;
