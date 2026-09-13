@@ -478,7 +478,7 @@ const syncLiveScoresWithSportsDB = async () => {
       const awayScoreVal = item.intAwayScore !== null && item.intAwayScore !== undefined ? String(item.intAwayScore) : null;
 
       try {
-        await db
+        const updateRes = await db
           .update(matches)
           .set({
             homeScore: homeScoreVal,
@@ -499,6 +499,53 @@ const syncLiveScoresWithSportsDB = async () => {
               )
             )
           );
+
+        if (updateRes[0]?.affectedRows === 0 && targetStatus === 'live') {
+          let catId = null;
+          let subcatId = null;
+          const sportLower = (item.strSport || '').toLowerCase();
+          const leagueLower = (item.strLeague || '').toLowerCase();
+
+          if (sportLower.includes('american football') || leagueLower.includes('nfl')) {
+            catId = 5;
+            subcatId = 2; // NFL subcategory
+          } else if (sportLower.includes('soccer') || sportLower.includes('football')) {
+            catId = 1;
+          } else if (sportLower.includes('basketball')) {
+            catId = 4;
+          } else if (sportLower.includes('tennis')) {
+            catId = 7;
+          } else if (sportLower.includes('rugby')) {
+            catId = 6;
+          }
+
+          if (catId) {
+            const cleanSlug = generateCleanMatchSlug(item.strHomeTeam, item.strAwayTeam, null, new Date(item.strTimestamp || Date.now()), item.idEvent);
+            await db.insert(matches).values({
+              sportsdbEventId: item.idEvent,
+              categoryId: catId,
+              subcategoryId: subcatId,
+              matchType: 'team_vs_team',
+              slug: cleanSlug,
+              title: null,
+              homeTeam: item.strHomeTeam,
+              homeTeamLogo: item.strHomeTeamBadge || null,
+              awayTeam: item.strAwayTeam,
+              awayTeamLogo: item.strAwayTeamBadge || null,
+              homeScore: homeScoreVal,
+              awayScore: awayScoreVal,
+              livePeriod: item.strStatus || null,
+              liveMinute: item.strProgress || null,
+              matchTime: new Date(item.strTimestamp || Date.now()),
+              status: 'live',
+              venue: item.strVenue || null,
+              playerImage: item.strThumb || null,
+              bgImage: item.strBanner || null,
+              displayOrder: 0,
+              isCustomized: false,
+            });
+          }
+        }
       } catch (e) {}
     }
   } catch (err) {
