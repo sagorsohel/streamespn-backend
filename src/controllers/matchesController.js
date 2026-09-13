@@ -159,6 +159,8 @@ const getMatches = async (req, res, next) => {
       conditions.push(or(isNull(matches.subcategoryId), eq(sportsSubcategories.showOnHome, true)));
     }
 
+    const pastCutoff = new Date(Date.now() - 3.5 * 60 * 60 * 1000);
+
     if (filterTab === 'live') {
       conditions.push(eq(matches.status, 'live'));
     } else if (filterTab === 'upcoming') {
@@ -167,6 +169,14 @@ const getMatches = async (req, res, next) => {
       conditions.push(and(ne(matches.status, 'finished'), ne(matches.status, 'live'), gte(matches.matchTime, startOfTomorrow)));
     } else if (filterTab === 'finished') {
       conditions.push(eq(matches.status, 'finished'));
+    } else if (!showAll) {
+      // Public website queries: only show live matches or upcoming matches that have not already passed
+      conditions.push(
+        or(
+          eq(matches.status, 'live'),
+          and(ne(matches.status, 'finished'), gte(matches.matchTime, pastCutoff))
+        )
+      );
     } else {
       conditions.push(ne(matches.status, 'finished'));
     }
@@ -1021,28 +1031,39 @@ const syncMatchesCore = async () => {
   await ensureTableExists();
 
   const now = new Date();
-  const today = now.toISOString().split('T')[0];
-  const tomorrow = new Date(now.valueOf() + 86400000).toISOString().split('T')[0];
-
   const startOfToday = new Date(now);
   startOfToday.setHours(0, 0, 0, 0);
 
-  // 🧹 1. Clean up / Delete all past matches prior to today (before 00:00:00 AM today)
+  const today = now.toISOString().split('T')[0];
+  const tomorrow = new Date(now.valueOf() + 86400000).toISOString().split('T')[0];
+  const dayAfterTomorrow = new Date(now.valueOf() + 172800000).toISOString().split('T')[0];
+
+  // 🧹 1. Clean up: Mark matches that ended > 3.5 hours ago as 'finished'
+  const pastCutoff = new Date(Date.now() - 3.5 * 60 * 60 * 1000);
+  try {
+    await db
+      .update(matches)
+      .set({ status: 'finished' })
+      .where(and(eq(matches.status, 'upcoming'), lt(matches.matchTime, pastCutoff)));
+  } catch (err) { }
+
+  // 🧹 2. Delete matches that ended more than 24 hours ago
+  const oldCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   let deletedCount = 0;
   try {
     const deleteRes = await db
       .delete(matches)
-      .where(lt(matches.matchTime, startOfToday));
+      .where(lt(matches.matchTime, oldCutoff));
     deletedCount = deleteRes[0]?.affectedRows || 0;
     if (deletedCount > 0) {
-      console.log(`🧹 [MATCH SYNC] Cleaned up ${deletedCount} past matches prior to ${today}.`);
+      console.log(`🧹 [MATCH SYNC] Cleaned up ${deletedCount} past matches older than 24 hours.`);
     }
   } catch (delErr) {
     console.error('❌ [MATCH SYNC] Error cleaning up past matches:', delErr.message);
   }
 
-  // 📡 2. Sync Today and Tomorrow ONLY (2 Days)
-  const datesToSync = [today, tomorrow];
+  // 📡 3. Sync Today, Tomorrow & Next Day (3 Days coverage for all global timezones)
+  const datesToSync = [today, tomorrow, dayAfterTomorrow];
   let rawEvents = [];
 
   const apiResponses = await Promise.all(
@@ -1215,12 +1236,12 @@ const syncMatchesCore = async () => {
       continue;
     }
 
-    // ⛔ 2. EXCLUDE MATCHES OUTSIDE TODAY & TOMORROW
-    const endOfTomorrow = new Date(now);
-    endOfTomorrow.setDate(endOfTomorrow.getDate() + 1);
-    endOfTomorrow.setHours(23, 59, 59, 999);
+    // ⛔ 2. EXCLUDE MATCHES OUTSIDE SYNC WINDOW (Today, Tomorrow & Day After Tomorrow)
+    const endOfSyncWindow = new Date(now);
+    endOfSyncWindow.setDate(endOfSyncWindow.getDate() + 2);
+    endOfSyncWindow.setHours(23, 59, 59, 999);
 
-    if (matchTimeVal < startOfToday || matchTimeVal > endOfTomorrow) {
+    if (matchTimeVal < startOfToday || matchTimeVal > endOfSyncWindow) {
       continue;
     }
 
