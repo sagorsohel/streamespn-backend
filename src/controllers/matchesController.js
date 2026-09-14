@@ -147,6 +147,13 @@ const getMatches = async (req, res, next) => {
     const startOfTomorrow = new Date(now);
     startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
     startOfTomorrow.setHours(0, 0, 0, 0);
+    const endOfTomorrow = new Date(startOfTomorrow);
+    endOfTomorrow.setHours(23, 59, 59, 999);
+
+    // Buffer to support global timezones (UTC-12 to UTC+14):
+    // Prevents server timezone vs client local timezone mismatch
+    const queryRangeStart = new Date(startOfToday.getTime() - 14 * 3600 * 1000);
+    const queryRangeEnd = new Date(endOfTomorrow.getTime() + 14 * 3600 * 1000);
 
     const conditions = [];
 
@@ -161,13 +168,29 @@ const getMatches = async (req, res, next) => {
     }
 
     if (filterTab === 'live') {
+      // Live matches: ALWAYS show regardless of matchTime / start time
       conditions.push(eq(matches.status, 'live'));
     } else if (filterTab === 'upcoming') {
-      conditions.push(and(eq(matches.status, 'upcoming'), gte(matches.matchTime, startOfToday), lte(matches.matchTime, endOfToday)));
+      conditions.push(and(eq(matches.status, 'upcoming'), gte(matches.matchTime, queryRangeStart), lte(matches.matchTime, endOfToday)));
     } else if (filterTab === 'nextDay' || filterTab === 'tomorrow') {
-      conditions.push(and(ne(matches.status, 'finished'), ne(matches.status, 'live'), gte(matches.matchTime, startOfTomorrow)));
+      conditions.push(and(ne(matches.status, 'finished'), ne(matches.status, 'live'), gte(matches.matchTime, startOfTomorrow), lte(matches.matchTime, queryRangeEnd)));
     } else if (filterTab === 'finished') {
       conditions.push(eq(matches.status, 'finished'));
+    } else if (!showAll) {
+      // For public website:
+      // 1. Live matches: ALWAYS show, even if matchTime was from earlier / older.
+      // 2. Upcoming matches: MUST not be finished, and within Today/Tomorrow window (with timezone buffer).
+      // Old past matches whose date has changed are excluded!
+      conditions.push(
+        or(
+          eq(matches.status, 'live'),
+          and(
+            ne(matches.status, 'finished'),
+            gte(matches.matchTime, queryRangeStart),
+            lte(matches.matchTime, queryRangeEnd)
+          )
+        )
+      );
     } else {
       conditions.push(ne(matches.status, 'finished'));
     }
@@ -324,6 +347,26 @@ const getBannerMatches = async (req, res, next) => {
       subcategoryReferralLink: sportsSubcategories.referralLink,
     };
 
+    const now = new Date();
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const startOfTomorrow = new Date(now);
+    startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+    const endOfTomorrow = new Date(startOfTomorrow);
+    endOfTomorrow.setHours(23, 59, 59, 999);
+
+    const queryRangeStart = new Date(startOfToday.getTime() - 14 * 3600 * 1000);
+    const queryRangeEnd = new Date(endOfTomorrow.getTime() + 14 * 3600 * 1000);
+
+    const bannerMatchCondition = or(
+      eq(matches.status, 'live'),
+      and(
+        ne(matches.status, 'finished'),
+        gte(matches.matchTime, queryRangeStart),
+        lte(matches.matchTime, queryRangeEnd)
+      )
+    );
+
     const statusOrder = sql`CASE 
       WHEN ${matches.status} = 'live' THEN 1 
       WHEN ${matches.status} = 'upcoming' THEN 2 
@@ -346,7 +389,7 @@ const getBannerMatches = async (req, res, next) => {
         .where(
           and(
             inArray(matches.subcategoryId, bannerSubcatIds),
-            ne(matches.status, 'finished')
+            bannerMatchCondition
           )
         )
         .orderBy(statusOrder, asc(matches.matchTime))
@@ -372,8 +415,8 @@ const getBannerMatches = async (req, res, next) => {
       .leftJoin(matches, eq(sportsSubcategories.id, matches.subcategoryId))
       .where(and(eq(sportsSubcategories.status, true), eq(sportsSubcategories.showOnHome, true)))
       .groupBy(sportsSubcategories.id)
-      .having(sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} != 'finished' THEN 1 ELSE NULL END) >= 10`)
-      .orderBy(desc(sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} != 'finished' THEN 1 ELSE NULL END)`));
+      .having(sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} = 'live' OR (${matches.status} != 'finished' AND ${matches.matchTime} >= ${queryRangeStart} AND ${matches.matchTime} <= ${queryRangeEnd})) THEN 1 ELSE NULL END) >= 10`)
+      .orderBy(desc(sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} = 'live' OR (${matches.status} != 'finished' AND ${matches.matchTime} >= ${queryRangeStart} AND ${matches.matchTime} <= ${queryRangeEnd})) THEN 1 ELSE NULL END)`));
 
     if (topSubcatsWithMatches.length > 0) {
       const topIds = topSubcatsWithMatches.map((s) => s.id);
@@ -385,7 +428,7 @@ const getBannerMatches = async (req, res, next) => {
         .where(
           and(
             inArray(matches.subcategoryId, topIds),
-            ne(matches.status, 'finished')
+            bannerMatchCondition
           )
         )
         .orderBy(statusOrder, asc(matches.matchTime))
@@ -409,7 +452,7 @@ const getBannerMatches = async (req, res, next) => {
       .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
       .where(
         and(
-          ne(matches.status, 'finished'),
+          bannerMatchCondition,
           or(
             isNull(matches.subcategoryId),
             and(eq(sportsSubcategories.status, true), eq(sportsSubcategories.showOnHome, true))
@@ -446,8 +489,21 @@ const syncLiveScoresWithSportsDB = async () => {
       if (!item.strHomeTeam || !item.strAwayTeam) continue;
 
       const statusStr = (item.strStatus || '').toLowerCase().trim();
+      const progressStr = (item.strProgress || '').toLowerCase().trim();
       let targetStatus = 'upcoming';
-      if (statusStr === 'ft' || statusStr === 'finished' || statusStr === 'aet') {
+
+      // 1. Check if Finished (SportsDB often returns strStatus: null and strProgress: "Final" or "Final/OT" or "FT")
+      if (
+        statusStr === 'ft' ||
+        statusStr === 'finished' ||
+        statusStr === 'aet' ||
+        statusStr.includes('final') ||
+        statusStr.includes('ended') ||
+        progressStr.includes('final') ||
+        progressStr.includes('ft') ||
+        progressStr.includes('finished') ||
+        progressStr.includes('ended')
+      ) {
         targetStatus = 'finished';
       } else if (
         statusStr.includes('1h') ||
@@ -465,7 +521,14 @@ const syncLiveScoresWithSportsDB = async () => {
         statusStr.startsWith('p3') ||
         statusStr.includes('half') ||
         statusStr.includes('ot') ||
-        statusStr.includes('set')
+        statusStr.includes('set') ||
+        progressStr.includes('1h') ||
+        progressStr.includes('2h') ||
+        progressStr.includes('ht') ||
+        progressStr.includes('q1') ||
+        progressStr.includes('q2') ||
+        progressStr.includes('q3') ||
+        progressStr.includes('q4')
       ) {
         targetStatus = 'live';
       } else if (statusStr === 'ns' || statusStr === 'not started' || statusStr.includes('sched')) {

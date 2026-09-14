@@ -59,7 +59,21 @@ const getSubcategories = async (req, res, next) => {
     await ensureTableExists();
     const { categoryId, trending, status, activeOnly, all, admin, home } = req.query;
 
-    const matchCountExpr = sql`CAST(COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} != 'finished' OR ${matches.status} IS NULL) THEN 1 ELSE NULL END) AS UNSIGNED)`;
+    const now = new Date();
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfTomorrow = new Date(now);
+    endOfTomorrow.setDate(endOfTomorrow.getDate() + 1);
+    endOfTomorrow.setHours(23, 59, 59, 999);
+
+    const queryRangeStart = new Date(startOfToday.getTime() - 14 * 3600 * 1000);
+    const queryRangeEnd = new Date(endOfTomorrow.getTime() + 14 * 3600 * 1000);
+
+    const matchCountExpr = sql`CAST(COUNT(CASE 
+      WHEN ${matches.id} IS NOT NULL AND (
+        ${matches.status} = 'live' 
+        OR (${matches.status} != 'finished' AND ${matches.matchTime} >= ${queryRangeStart} AND ${matches.matchTime} <= ${queryRangeEnd})
+      ) THEN 1 ELSE NULL END) AS UNSIGNED)`;
     const liveMatchCountExpr = sql`CAST(COUNT(CASE WHEN ${matches.id} IS NOT NULL AND ${matches.status} = 'live' THEN 1 ELSE NULL END) AS UNSIGNED)`;
     const totalMatchCountExpr = sql`CAST(COUNT(${matches.id}) AS UNSIGNED)`;
 
@@ -135,7 +149,7 @@ const getSubcategories = async (req, res, next) => {
       query = query.having(
         or(
           eq(sportsSubcategories.isTrending, true),
-          sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} != 'finished' OR ${matches.status} IS NULL) THEN 1 ELSE NULL END) >= ${minMatches}`
+          sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} = 'live' OR (${matches.status} != 'finished' AND ${matches.matchTime} >= ${queryRangeStart} AND ${matches.matchTime} <= ${queryRangeEnd})) THEN 1 ELSE NULL END) >= ${minMatches}`
         )
       );
 
