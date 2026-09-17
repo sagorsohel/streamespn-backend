@@ -473,6 +473,126 @@ const getBannerMatches = async (req, res, next) => {
   }
 };
 
+// Helper to resolve category from sport name and league name dynamically
+const resolveCategoryForLiveMatch = (sportName, leagueName, categories) => {
+  const sLower = (sportName || '').toLowerCase().trim();
+  const lLower = (leagueName || '').toLowerCase().trim();
+
+  // 1. Direct match with sportName in DB
+  let matched = categories.find((c) => c.sportName.toLowerCase().trim() === sLower);
+  if (matched) return matched;
+
+  // 2. Keyword matching
+  if (sLower.includes('american football') || sLower.includes('nfl') || lLower.includes('nfl')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('american football'));
+  } else if (sLower.includes('soccer') || (sLower.includes('football') && !sLower.includes('american'))) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('soccer') || c.sportName.toLowerCase() === 'football');
+  } else if (sLower.includes('basketball') || sLower.includes('nba') || lLower.includes('nba')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('basketball'));
+  } else if (sLower.includes('tennis') && !sLower.includes('table')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('tennis') && !c.sportName.toLowerCase().includes('table'));
+  } else if (sLower.includes('cricket')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('cricket'));
+  } else if (sLower.includes('rugby')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('rugby'));
+  } else if (sLower.includes('fighting') || sLower.includes('mma') || sLower.includes('boxing') || sLower.includes('ufc')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('fighting'));
+  } else if (sLower.includes('motorsport') || sLower.includes('formula 1') || sLower.includes('f1') || sLower.includes('racing') || lLower.includes('nascar')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('motorsport'));
+  } else if (sLower.includes('volleyball')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('volleyball'));
+  } else if (sLower.includes('table tennis') || sLower.includes('ping pong')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('table tennis'));
+  } else if (sLower.includes('cycling')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('cycling'));
+  }
+
+  // 3. Substring match fallback
+  if (!matched) {
+    matched = categories.find((c) => sLower.includes(c.sportName.toLowerCase()));
+  }
+
+  return matched || categories.find((c) => c.sportName.toLowerCase() === 'soccer') || categories[0] || null;
+};
+
+// Helper to resolve or auto-create subcategory with official badge
+const resolveOrCreateSubcategory = async (catId, leagueName, idLeague, subcategoryMap) => {
+  if (!leagueName || !leagueName.trim()) return null;
+  const cleanLeague = leagueName.trim();
+  const lowerLeague = cleanLeague.toLowerCase();
+
+  let matchedSubcat = subcategoryMap.get(lowerLeague);
+
+  if (matchedSubcat) {
+    // If it exists but is disabled (status = false), auto-activate it so the live match is visible
+    if (!matchedSubcat.status) {
+      try {
+        await db
+          .update(sportsSubcategories)
+          .set({ status: true })
+          .where(eq(sportsSubcategories.id, matchedSubcat.id));
+        matchedSubcat.status = true;
+      } catch (e) {}
+    }
+    return matchedSubcat.id;
+  }
+
+  // Subcategory not found in DB -> Fetch official league badge if available and create it!
+  let badgeUrl = null;
+  if (idLeague) {
+    try {
+      const lRes = await axios.get(
+        `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/lookupleague.php?id=${idLeague}`,
+        { timeout: 3000 }
+      );
+      const leagueData = lRes.data?.leagues?.[0];
+      if (leagueData) {
+        badgeUrl = leagueData.strBadge || leagueData.strLogo || null;
+      }
+    } catch (e) {}
+  }
+
+  try {
+    const [insertResult] = await db.insert(sportsSubcategories).values({
+      categoryId: catId,
+      name: cleanLeague,
+      logoUrl: badgeUrl,
+      status: true, // Auto-active so the match and league show up!
+      isTrending: false,
+      isHomeBanner: false,
+      showOnHome: true,
+      referralLink: null,
+      displayOrder: 0,
+      isCustomized: false,
+    });
+
+    const newSubcatId = insertResult.insertId;
+    const newSubcatObj = {
+      id: newSubcatId,
+      categoryId: catId,
+      name: cleanLeague,
+      logoUrl: badgeUrl,
+      status: true,
+    };
+    subcategoryMap.set(lowerLeague, newSubcatObj);
+    return newSubcatId;
+  } catch (insertErr) {
+    // In case of race condition or duplicate, re-fetch from DB
+    try {
+      const reCheck = await db
+        .select()
+        .from(sportsSubcategories)
+        .where(sql`LOWER(${sportsSubcategories.name}) = ${lowerLeague}`)
+        .limit(1);
+      if (reCheck.length > 0) {
+        subcategoryMap.set(lowerLeague, reCheck[0]);
+        return reCheck[0].id;
+      }
+    } catch (e) {}
+    return null;
+  }
+};
+
 let lastLiveSyncTime = 0;
 
 const syncLiveScoresWithSportsDB = async () => {
@@ -484,6 +604,13 @@ const syncLiveScoresWithSportsDB = async () => {
     const res = await fetch('https://www.thesportsdb.com/api/v1/json/3/livescore.php');
     const data = await res.json();
     if (!data.livescore || !Array.isArray(data.livescore)) return;
+
+    // Load categories & subcategories from DB for dynamic mapping
+    const dbCategories = await db.select().from(sportsCategories);
+    const dbSubcategories = await db.select().from(sportsSubcategories);
+    const subcategoryMap = new Map(
+      dbSubcategories.map((s) => [s.name.toLowerCase().trim(), s])
+    );
 
     for (const item of data.livescore) {
       if (!item.strHomeTeam || !item.strAwayTeam) continue;
@@ -540,16 +667,35 @@ const syncLiveScoresWithSportsDB = async () => {
       const homeScoreVal = item.intHomeScore !== null && item.intHomeScore !== undefined ? String(item.intHomeScore) : null;
       const awayScoreVal = item.intAwayScore !== null && item.intAwayScore !== undefined ? String(item.intAwayScore) : null;
 
+      // Resolve category & subcategory dynamically
+      const matchedCat = resolveCategoryForLiveMatch(item.strSport, item.strLeague, dbCategories);
+      const catId = matchedCat ? matchedCat.id : null;
+      let subcatId = null;
+
+      if (catId && item.strLeague) {
+        subcatId = await resolveOrCreateSubcategory(catId, item.strLeague, item.idLeague, subcategoryMap);
+      }
+
       try {
+        const updateFields = {
+          homeScore: homeScoreVal,
+          awayScore: awayScoreVal,
+          livePeriod: item.strStatus || null,
+          liveMinute: item.strProgress || null,
+          status: targetStatus,
+        };
+
+        // If existing match has NULL subcategoryId, automatically backfill and repair it!
+        if (subcatId) {
+          updateFields.subcategoryId = sql`COALESCE(${matches.subcategoryId}, ${subcatId})`;
+        }
+        if (catId) {
+          updateFields.categoryId = sql`COALESCE(${matches.categoryId}, ${catId})`;
+        }
+
         const updateRes = await db
           .update(matches)
-          .set({
-            homeScore: homeScoreVal,
-            awayScore: awayScoreVal,
-            livePeriod: item.strStatus || null,
-            liveMinute: item.strProgress || null,
-            status: targetStatus,
-          })
+          .set(updateFields)
           .where(
             and(
               eq(matches.isCustomized, false),
@@ -564,30 +710,12 @@ const syncLiveScoresWithSportsDB = async () => {
           );
 
         if (updateRes[0]?.affectedRows === 0 && targetStatus === 'live') {
-          let catId = null;
-          let subcatId = null;
-          const sportLower = (item.strSport || '').toLowerCase();
-          const leagueLower = (item.strLeague || '').toLowerCase();
-
-          if (sportLower.includes('american football') || leagueLower.includes('nfl')) {
-            catId = 5;
-            subcatId = 2; // NFL subcategory
-          } else if (sportLower.includes('soccer') || sportLower.includes('football')) {
-            catId = 1;
-          } else if (sportLower.includes('basketball')) {
-            catId = 4;
-          } else if (sportLower.includes('tennis')) {
-            catId = 7;
-          } else if (sportLower.includes('rugby')) {
-            catId = 6;
-          }
-
           if (catId) {
             const cleanSlug = generateCleanMatchSlug(item.strHomeTeam, item.strAwayTeam, null, new Date(item.strTimestamp || Date.now()), item.idEvent);
             await db.insert(matches).values({
               sportsdbEventId: item.idEvent,
               categoryId: catId,
-              subcategoryId: subcatId,
+              subcategoryId: subcatId, // ✅ Properly resolved and assigned!
               matchType: 'team_vs_team',
               slug: cleanSlug,
               title: null,
@@ -1248,7 +1376,7 @@ const syncMatchesCore = async () => {
             name: leagueName,
             logoUrl: subcatLogo,
             description: null,
-            status: false,
+            status: true,
             showOnHome: true,
             referralLink: null,
           });
@@ -1258,7 +1386,7 @@ const syncMatchesCore = async () => {
             categoryId: categoryId,
             name: leagueName,
             logoUrl: subcatLogo,
-            status: false,
+            status: true,
           };
           subcategoryMap.set(lowerLeague, matchedSubcat);
         } catch (subErr) {
@@ -1453,6 +1581,83 @@ const deleteAllMatches = async (req, res, next) => {
   }
 };
 
+// Reusable function to repair any matches that have missing subcategories
+const repairMatchesMissingSubcategoryCore = async () => {
+  try {
+    const matchesWithoutSubcat = await db
+      .select({
+        id: matches.id,
+        sportsdbEventId: matches.sportsdbEventId,
+        categoryId: matches.categoryId,
+        homeTeam: matches.homeTeam,
+        awayTeam: matches.awayTeam,
+      })
+      .from(matches)
+      .where(
+        and(
+          isNull(matches.subcategoryId),
+          sql`${matches.sportsdbEventId} IS NOT NULL AND ${matches.sportsdbEventId} != ''`
+        )
+      )
+      .limit(100);
+
+    if (matchesWithoutSubcat.length === 0) {
+      return { repairedCount: 0 };
+    }
+
+    console.log(`🔧 [REPAIR] Found ${matchesWithoutSubcat.length} matches with missing subcategory. Starting repair...`);
+
+    const dbCategories = await db.select().from(sportsCategories);
+    const dbSubcategories = await db.select().from(sportsSubcategories);
+    const subcategoryMap = new Map(
+      dbSubcategories.map((s) => [s.name.toLowerCase().trim(), s])
+    );
+
+    let repairedCount = 0;
+
+    for (const match of matchesWithoutSubcat) {
+      try {
+        const evRes = await axios.get(
+          `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/lookupevent.php?id=${match.sportsdbEventId}`,
+          { timeout: 5000 }
+        );
+        const ev = evRes.data?.events?.[0];
+        if (!ev) continue;
+
+        const leagueName = ev.strLeague?.trim();
+        const sportName = ev.strSport?.trim();
+        if (!leagueName) continue;
+
+        const matchedCat = resolveCategoryForLiveMatch(sportName, leagueName, dbCategories);
+        const targetCatId = matchedCat ? matchedCat.id : match.categoryId;
+        const subcatId = await resolveOrCreateSubcategory(targetCatId, leagueName, ev.idLeague, subcategoryMap);
+
+        if (subcatId) {
+          await db
+            .update(matches)
+            .set({
+              subcategoryId: subcatId,
+              categoryId: targetCatId,
+            })
+            .where(eq(matches.id, match.id));
+          repairedCount++;
+        }
+      } catch (itemErr) {
+        // continue
+      }
+    }
+
+    if (repairedCount > 0) {
+      console.log(`✅ [REPAIR] Successfully repaired ${repairedCount} matches with their official subcategories!`);
+    }
+
+    return { repairedCount };
+  } catch (err) {
+    console.error('❌ [REPAIR] Error repairing matches with missing subcategories:', err.message);
+    return { repairedCount: 0 };
+  }
+};
+
 module.exports = {
   getMatches,
   getBannerMatches,
@@ -1465,6 +1670,7 @@ module.exports = {
   reorderMatches,
   syncMatches,
   syncMatchesCore,
+  repairMatchesMissingSubcategoryCore,
   startDaily12AMScheduler,
   startDaily4AMScheduler: startDaily12AMScheduler,
 };

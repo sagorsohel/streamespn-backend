@@ -15,7 +15,7 @@ const startServer = async () => {
     connection.release();
 
     // 3. Automated Boot Migration & Match Sync (100% zero-command-line Hostinger automated sync)
-    const { syncMatchesCore, startDaily12AMScheduler } = require('./controllers/matchesController');
+    const { syncMatchesCore, startDaily12AMScheduler, repairMatchesMissingSubcategoryCore } = require('./controllers/matchesController');
     const { syncAllSubcategoryBadgesCore } = require('./controllers/subcategoriesController');
 
     console.log('🔄 [BOOT] Running automatic database migration and match sync on server boot...');
@@ -28,6 +28,13 @@ const startServer = async () => {
       .then((badgeRes) => {
         if (badgeRes?.updatedCount > 0) {
           console.log(`✅ [BOOT] Automatically verified and updated ${badgeRes.updatedCount} subcategory badges from TheSportsDB.`);
+        }
+        // Automatically check and repair any matches that are missing subcategories
+        return repairMatchesMissingSubcategoryCore();
+      })
+      .then((repairRes) => {
+        if (repairRes?.repairedCount > 0) {
+          console.log(`✅ [BOOT] Automatically repaired ${repairRes.repairedCount} matches with missing subcategories.`);
         }
       })
       .catch((err) => {
