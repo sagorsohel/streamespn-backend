@@ -512,7 +512,8 @@ const resolveCategoryForLiveMatch = (sportName, leagueName, categories) => {
     matched = categories.find((c) => sLower.includes(c.sportName.toLowerCase()));
   }
 
-  return matched || categories.find((c) => c.sportName.toLowerCase() === 'soccer') || categories[0] || null;
+  // If no registered category matches (e.g. Baseball, Ice Hockey, etc.), return null (DO NOT fallback to Soccer!)
+  return matched || null;
 };
 
 // Helper to resolve or auto-create subcategory with official badge
@@ -669,10 +670,14 @@ const syncLiveScoresWithSportsDB = async () => {
 
       // Resolve category & subcategory dynamically
       const matchedCat = resolveCategoryForLiveMatch(item.strSport, item.strLeague, dbCategories);
-      const catId = matchedCat ? matchedCat.id : null;
+      // Skip sports that are not part of our active sports categories (e.g., Baseball, Ice Hockey)
+      if (!matchedCat) {
+        continue;
+      }
+      const catId = matchedCat.id;
       let subcatId = null;
 
-      if (catId && item.strLeague) {
+      if (item.strLeague) {
         subcatId = await resolveOrCreateSubcategory(catId, item.strLeague, item.idLeague, subcategoryMap);
       }
 
@@ -1629,7 +1634,8 @@ const repairMatchesMissingSubcategoryCore = async () => {
         if (!leagueName) continue;
 
         const matchedCat = resolveCategoryForLiveMatch(sportName, leagueName, dbCategories);
-        const targetCatId = matchedCat ? matchedCat.id : match.categoryId;
+        if (!matchedCat) continue;
+        const targetCatId = matchedCat.id;
         const subcatId = await resolveOrCreateSubcategory(targetCatId, leagueName, ev.idLeague, subcategoryMap);
 
         if (subcatId) {
