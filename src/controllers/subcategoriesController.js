@@ -608,12 +608,23 @@ const syncSubcategories = async (req, res, next) => {
     }
 
     const sportName = category[0].sportName;
-    const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/search_all_leagues.php?s=${encodeURIComponent(sportName)}`;
-    
-    const apiRes = await axios.get(url);
-    const leagues = apiRes.data?.countries || apiRes.data?.countrys || apiRes.data?.leagues || [];
+    const sportsToFetch = sportName.toLowerCase() === 'hockey'
+      ? ['Ice Hockey', 'Field Hockey']
+      : [sportName];
 
-    if (!Array.isArray(leagues) || leagues.length === 0) {
+    let leagues = [];
+    for (const sName of sportsToFetch) {
+      const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/search_all_leagues.php?s=${encodeURIComponent(sName)}`;
+      try {
+        const apiRes = await axios.get(url);
+        const list = apiRes.data?.countries || apiRes.data?.countrys || apiRes.data?.leagues || [];
+        if (Array.isArray(list)) {
+          leagues.push(...list);
+        }
+      } catch (e) {}
+    }
+
+    if (leagues.length === 0) {
       return res.status(200).json({
         success: true,
         message: `No leagues found for sport "${sportName}" on TheSportsDB.`,
@@ -653,10 +664,10 @@ const syncSubcategories = async (req, res, next) => {
         categoryId: Number(categoryId),
         name: name,
         logoUrl: badgeLogo,
-        status: false, // Default OFF
-        isTrending: false, // Default OFF
-        isHomeBanner: false, // Default OFF
-        showOnHome: true, // Default ON (true)
+        status: true, // Default ON
+        isTrending: false,
+        isHomeBanner: false,
+        showOnHome: true,
         referralLink: null,
         displayOrder: existingSubcategories.length + syncedCount + 1,
         isCustomized: false,
@@ -737,25 +748,31 @@ const syncAllSubcategoryBadgesCore = async () => {
 
   for (const cat of categories) {
     try {
-      const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/search_all_leagues.php?s=${encodeURIComponent(cat.sportName)}`;
-      const apiRes = await axios.get(url, { timeout: 10000 });
-      const list = apiRes.data?.countries || apiRes.data?.countrys || apiRes.data?.leagues || [];
+      const sportsToFetch = cat.sportName.toLowerCase() === 'hockey'
+        ? ['Ice Hockey', 'Field Hockey']
+        : [cat.sportName];
 
-      for (const item of list) {
-        const leagueName = item.strLeague?.trim();
-        if (!leagueName) continue;
+      for (const sName of sportsToFetch) {
+        const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/search_all_leagues.php?s=${encodeURIComponent(sName)}`;
+        const apiRes = await axios.get(url, { timeout: 10000 });
+        const list = apiRes.data?.countries || apiRes.data?.countrys || apiRes.data?.leagues || [];
 
-        const badgeLogo = item.strBadge || item.strLogo || null;
-        if (!badgeLogo) continue;
+        for (const item of list) {
+          const leagueName = item.strLeague?.trim();
+          if (!leagueName) continue;
 
-        const existing = subcatMap.get(leagueName.toLowerCase());
-        if (existing && (!existing.logoUrl || existing.logoUrl.includes('/event/poster/') || existing.logoUrl !== badgeLogo)) {
-          await db
-            .update(sportsSubcategories)
-            .set({ logoUrl: badgeLogo })
-            .where(eq(sportsSubcategories.id, existing.id));
-          updatedCount++;
-          existing.logoUrl = badgeLogo;
+          const badgeLogo = item.strBadge || item.strLogo || null;
+          if (!badgeLogo) continue;
+
+          const existing = subcatMap.get(leagueName.toLowerCase());
+          if (existing && (!existing.logoUrl || existing.logoUrl.includes('/event/poster/') || existing.logoUrl !== badgeLogo)) {
+            await db
+              .update(sportsSubcategories)
+              .set({ logoUrl: badgeLogo })
+              .where(eq(sportsSubcategories.id, existing.id));
+            updatedCount++;
+            existing.logoUrl = badgeLogo;
+          }
         }
       }
     } catch (err) {

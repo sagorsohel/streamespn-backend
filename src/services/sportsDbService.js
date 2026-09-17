@@ -17,6 +17,9 @@ const TARGET_SPORTS = [
   'nfl',
   'cycling',
   'boxing',
+  'baseball',
+  'ice hockey',
+  'hockey',
 ];
 
 const fetchAllSportsFromApi = async () => {
@@ -49,10 +52,34 @@ const getTargetSportsFiltered = async () => {
   const allSports = await fetchAllSportsFromApi();
   if (!allSports || allSports.length === 0) return [];
 
-  return allSports.filter((item) => {
-    const name = (item.strSport || item.name || '').toLowerCase();
-    return TARGET_SPORTS.some((target) => name.includes(target) || target.includes(name));
-  });
+  const filtered = [];
+  let addedHockey = false;
+
+  for (const item of allSports) {
+    const rawName = (item.strSport || item.name || '').trim();
+    const name = rawName.toLowerCase();
+
+    // Both Ice Hockey and Field Hockey are unified into a single "Hockey" category
+    if (name.includes('hockey')) {
+      if (!addedHockey) {
+        filtered.push({
+          ...item,
+          strSport: 'Hockey',
+          name: 'Hockey',
+          strSportThumb: item.strSportThumb || 'https://www.thesportsdb.com/images/sports/ice_hockey.jpg',
+          strSportIconGreen: item.strSportIconGreen || 'https://www.thesportsdb.com/images/icons/sports/icehockey.png',
+        });
+        addedHockey = true;
+      }
+      continue;
+    }
+
+    if (TARGET_SPORTS.some((target) => name.includes(target) || target.includes(name))) {
+      filtered.push(item);
+    }
+  }
+
+  return filtered;
 };
 
 module.exports = {

@@ -489,6 +489,10 @@ const resolveCategoryForLiveMatch = (sportName, leagueName, categories) => {
     matched = categories.find((c) => c.sportName.toLowerCase().includes('soccer') || c.sportName.toLowerCase() === 'football');
   } else if (sLower.includes('basketball') || sLower.includes('nba') || lLower.includes('nba')) {
     matched = categories.find((c) => c.sportName.toLowerCase().includes('basketball'));
+  } else if (sLower.includes('baseball') || lLower.includes('mlb') || lLower.includes('baseball') || lLower.includes('cpbl') || lLower.includes('kbo') || lLower.includes('npb')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('baseball'));
+  } else if (sLower.includes('hockey') || lLower.includes('nhl') || lLower.includes('khl') || lLower.includes('vhl') || lLower.includes('hockey')) {
+    matched = categories.find((c) => c.sportName.toLowerCase().includes('hockey'));
   } else if (sLower.includes('tennis') && !sLower.includes('table')) {
     matched = categories.find((c) => c.sportName.toLowerCase().includes('tennis') && !c.sportName.toLowerCase().includes('table'));
   } else if (sLower.includes('cricket')) {
@@ -674,11 +678,13 @@ const syncLiveScoresWithSportsDB = async () => {
       if (!matchedCat) {
         continue;
       }
-      const catId = matchedCat.id;
-      let subcatId = null;
-
+      let finalCatId = catId;
       if (item.strLeague) {
         subcatId = await resolveOrCreateSubcategory(catId, item.strLeague, item.idLeague, subcategoryMap);
+        const resolvedSub = subcategoryMap.get(item.strLeague.toLowerCase().trim());
+        if (resolvedSub && resolvedSub.categoryId) {
+          finalCatId = resolvedSub.categoryId;
+        }
       }
 
       try {
@@ -694,8 +700,8 @@ const syncLiveScoresWithSportsDB = async () => {
         if (subcatId) {
           updateFields.subcategoryId = sql`COALESCE(${matches.subcategoryId}, ${subcatId})`;
         }
-        if (catId) {
-          updateFields.categoryId = sql`COALESCE(${matches.categoryId}, ${catId})`;
+        if (finalCatId) {
+          updateFields.categoryId = sql`COALESCE(${matches.categoryId}, ${finalCatId})`;
         }
 
         const updateRes = await db
@@ -715,11 +721,11 @@ const syncLiveScoresWithSportsDB = async () => {
           );
 
         if (updateRes[0]?.affectedRows === 0 && targetStatus === 'live') {
-          if (catId) {
+          if (finalCatId) {
             const cleanSlug = generateCleanMatchSlug(item.strHomeTeam, item.strAwayTeam, null, new Date(item.strTimestamp || Date.now()), item.idEvent);
             await db.insert(matches).values({
               sportsdbEventId: item.idEvent,
-              categoryId: catId,
+              categoryId: finalCatId,
               subcategoryId: subcatId, // ✅ Properly resolved and assigned!
               matchType: 'team_vs_team',
               slug: cleanSlug,
@@ -1350,6 +1356,10 @@ const syncMatchesCore = async () => {
         matchedCategory = categoryMap.get('american football');
       } else if (sportName.toLowerCase() === 'soccer') {
         matchedCategory = categoryMap.get('football');
+      } else if (sportName.toLowerCase().includes('hockey')) {
+        matchedCategory = categoryMap.get('ice hockey') || categoryMap.get('hockey');
+      } else if (sportName.toLowerCase().includes('baseball')) {
+        matchedCategory = categoryMap.get('baseball');
       }
     }
 
@@ -1635,8 +1645,13 @@ const repairMatchesMissingSubcategoryCore = async () => {
 
         const matchedCat = resolveCategoryForLiveMatch(sportName, leagueName, dbCategories);
         if (!matchedCat) continue;
-        const targetCatId = matchedCat.id;
+        let targetCatId = matchedCat.id;
         const subcatId = await resolveOrCreateSubcategory(targetCatId, leagueName, ev.idLeague, subcategoryMap);
+
+        const resolvedSub = subcategoryMap.get(leagueName.toLowerCase());
+        if (resolvedSub && resolvedSub.categoryId) {
+          targetCatId = resolvedSub.categoryId;
+        }
 
         if (subcatId) {
           await db
