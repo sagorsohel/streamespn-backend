@@ -581,19 +581,118 @@ const deleteSubcategory = async (req, res, next) => {
   }
 };
 
-// Sync Subcategories from TheSportsDB (by Category ID or Sport Name)
+// Helper to sync leagues for a single sports category
+const syncSingleCategoryLeagues = async (category) => {
+  const sportName = category.sportName;
+  const sportsToFetch = sportName.toLowerCase() === 'hockey'
+    ? ['Ice Hockey', 'Field Hockey']
+    : [sportName];
+
+  let leagues = [];
+  for (const sName of sportsToFetch) {
+    const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/search_all_leagues.php?s=${encodeURIComponent(sName)}`;
+    try {
+      const apiRes = await axios.get(url, { timeout: 10000 });
+      const list = apiRes.data?.countries || apiRes.data?.countrys || apiRes.data?.leagues || [];
+      if (Array.isArray(list)) {
+        leagues.push(...list);
+      }
+    } catch (e) {}
+  }
+
+  if (leagues.length === 0) {
+    return { syncedCount: 0, updatedLogosCount: 0 };
+  }
+
+  const existingSubcategories = await db
+    .select()
+    .from(sportsSubcategories)
+    .where(eq(sportsSubcategories.categoryId, Number(category.id)));
+
+  const existingMap = new Map(existingSubcategories.map((s) => [s.name.toLowerCase().trim(), s]));
+  let syncedCount = 0;
+  let updatedLogosCount = 0;
+
+  for (const league of leagues) {
+    const name = league.strLeague?.trim();
+    if (!name) continue;
+
+    const badgeLogo = league.strBadge || league.strLogo || null;
+    const lowerName = name.toLowerCase();
+
+    if (existingMap.has(lowerName)) {
+      const existing = existingMap.get(lowerName);
+      if (badgeLogo && (!existing.logoUrl || existing.logoUrl.includes('/event/poster/') || existing.logoUrl !== badgeLogo)) {
+        await db
+          .update(sportsSubcategories)
+          .set({ logoUrl: badgeLogo })
+          .where(eq(sportsSubcategories.id, existing.id));
+        updatedLogosCount++;
+      }
+      continue;
+    }
+
+    await db.insert(sportsSubcategories).values({
+      categoryId: Number(category.id),
+      name: name,
+      logoUrl: badgeLogo,
+      status: true, // Default ON
+      isTrending: false,
+      isHomeBanner: false,
+      showOnHome: true,
+      referralLink: null,
+      displayOrder: existingSubcategories.length + syncedCount + 1,
+      isCustomized: false,
+    });
+
+    syncedCount++;
+  }
+
+  return { syncedCount, updatedLogosCount };
+};
+
+// Sync Subcategories from TheSportsDB (by Category ID or all sports categories)
 const syncSubcategories = async (req, res, next) => {
   try {
     await ensureTableExists();
     const { categoryId } = req.body;
 
-    if (!categoryId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide categoryId to sync.',
+    // If 'all' or empty, sync all sports categories
+    if (!categoryId || categoryId === 'all') {
+      const allCategories = await db
+        .select()
+        .from(sportsCategories)
+        .orderBy(asc(sportsCategories.displayOrder));
+
+      if (allCategories.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: 'No sports categories found to sync.',
+          data: { syncedCount: 0, updatedLogosCount: 0, categoriesCount: 0 },
+        });
+      }
+
+      let totalSynced = 0;
+      let totalUpdated = 0;
+
+      for (const cat of allCategories) {
+        try {
+          const { syncedCount, updatedLogosCount } = await syncSingleCategoryLeagues(cat);
+          totalSynced += syncedCount;
+          totalUpdated += updatedLogosCount;
+        } catch (catErr) {
+          console.error(`Error syncing leagues for ${cat.sportName}:`, catErr.message);
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `All sports categories synced successfully! Added ${totalSynced} new subcategories and updated ${totalUpdated} badges across ${allCategories.length} sports.`,
+        data: { syncedCount: totalSynced, updatedLogosCount: totalUpdated, categoriesCount: allCategories.length },
       });
     }
 
+    // Single category sync
     const category = await db
       .select()
       .from(sportsCategories)
@@ -607,78 +706,11 @@ const syncSubcategories = async (req, res, next) => {
       });
     }
 
-    const sportName = category[0].sportName;
-    const sportsToFetch = sportName.toLowerCase() === 'hockey'
-      ? ['Ice Hockey', 'Field Hockey']
-      : [sportName];
-
-    let leagues = [];
-    for (const sName of sportsToFetch) {
-      const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/search_all_leagues.php?s=${encodeURIComponent(sName)}`;
-      try {
-        const apiRes = await axios.get(url);
-        const list = apiRes.data?.countries || apiRes.data?.countrys || apiRes.data?.leagues || [];
-        if (Array.isArray(list)) {
-          leagues.push(...list);
-        }
-      } catch (e) {}
-    }
-
-    if (leagues.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: `No leagues found for sport "${sportName}" on TheSportsDB.`,
-        data: { syncedCount: 0 },
-      });
-    }
-
-    const existingSubcategories = await db
-      .select()
-      .from(sportsSubcategories)
-      .where(eq(sportsSubcategories.categoryId, Number(categoryId)));
-
-    const existingMap = new Map(existingSubcategories.map((s) => [s.name.toLowerCase().trim(), s]));
-    let syncedCount = 0;
-    let updatedLogosCount = 0;
-
-    for (const league of leagues) {
-      const name = league.strLeague?.trim();
-      if (!name) continue;
-
-      const badgeLogo = league.strBadge || league.strLogo || null;
-      const lowerName = name.toLowerCase();
-
-      if (existingMap.has(lowerName)) {
-        const existing = existingMap.get(lowerName);
-        if (badgeLogo && (!existing.logoUrl || existing.logoUrl.includes('/event/poster/') || existing.logoUrl !== badgeLogo)) {
-          await db
-            .update(sportsSubcategories)
-            .set({ logoUrl: badgeLogo })
-            .where(eq(sportsSubcategories.id, existing.id));
-          updatedLogosCount++;
-        }
-        continue;
-      }
-
-      await db.insert(sportsSubcategories).values({
-        categoryId: Number(categoryId),
-        name: name,
-        logoUrl: badgeLogo,
-        status: true, // Default ON
-        isTrending: false,
-        isHomeBanner: false,
-        showOnHome: true,
-        referralLink: null,
-        displayOrder: existingSubcategories.length + syncedCount + 1,
-        isCustomized: false,
-      });
-
-      syncedCount++;
-    }
+    const { syncedCount, updatedLogosCount } = await syncSingleCategoryLeagues(category[0]);
 
     return res.status(200).json({
       success: true,
-      message: `Successfully processed "${sportName}": ${syncedCount} new subcategories added, ${updatedLogosCount} subcategory badges updated.`,
+      message: `Successfully processed "${category[0].sportName}": ${syncedCount} new subcategories added, ${updatedLogosCount} badges updated.`,
       data: { syncedCount, updatedLogosCount },
     });
   } catch (error) {
@@ -686,18 +718,19 @@ const syncSubcategories = async (req, res, next) => {
   }
 };
 
-// Bulk Update Subcategory Status (Enable All or Disable All by Category or IDs)
+// Bulk Update Subcategory (Status, Home Visibility, Banner, Trending by Category or IDs)
 const bulkUpdateSubcategoryStatus = async (req, res, next) => {
   try {
     await ensureTableExists();
-    const { categoryId, ids, status } = req.body;
-    const targetStatus = Boolean(status);
+    const { categoryId, ids, status, type = 'status', value } = req.body;
 
     let whereClause;
     if (Array.isArray(ids) && ids.length > 0) {
       whereClause = inArray(sportsSubcategories.id, ids.map(Number));
     } else if (categoryId && categoryId !== 'all') {
       whereClause = eq(sportsSubcategories.categoryId, Number(categoryId));
+    } else if (categoryId === 'all') {
+      whereClause = undefined;
     } else {
       return res.status(400).json({
         success: false,
@@ -705,21 +738,46 @@ const bulkUpdateSubcategoryStatus = async (req, res, next) => {
       });
     }
 
-    await db
-      .update(sportsSubcategories)
-      .set({
-        status: targetStatus,
-        isCustomized: true,
-      })
-      .where(whereClause);
+    // Determine what field to update:
+    // Support type: 'status' | 'home' | 'banner' | 'trending'
+    // or explicit keys: showOnHome, isHomeBanner, isTrending, status
+    const updateData = { isCustomized: true };
+    let actionName = 'Status';
+    let targetVal = true;
+
+    if (type === 'home' || req.body.showOnHome !== undefined) {
+      targetVal = value !== undefined ? Boolean(value) : (req.body.showOnHome !== undefined ? Boolean(req.body.showOnHome) : Boolean(status));
+      updateData.showOnHome = targetVal;
+      actionName = `Homepage visibility set to ${targetVal ? 'ON (Shown on Home)' : 'OFF (Hidden from Home)'}`;
+    } else if (type === 'banner' || req.body.isHomeBanner !== undefined) {
+      targetVal = value !== undefined ? Boolean(value) : (req.body.isHomeBanner !== undefined ? Boolean(req.body.isHomeBanner) : Boolean(status));
+      updateData.isHomeBanner = targetVal;
+      actionName = `Home banner set to ${targetVal ? 'ON (Shown in Carousel)' : 'OFF'}`;
+    } else if (type === 'trending' || req.body.isTrending !== undefined) {
+      targetVal = value !== undefined ? Boolean(value) : (req.body.isTrending !== undefined ? Boolean(req.body.isTrending) : Boolean(status));
+      updateData.isTrending = targetVal;
+      actionName = `Trending set to ${targetVal ? 'ON (Trending)' : 'OFF'}`;
+    } else {
+      targetVal = Boolean(status);
+      updateData.status = targetVal;
+      actionName = `Status set to ${targetVal ? 'ON (Active)' : 'OFF (Inactive)'}`;
+    }
+
+    if (whereClause) {
+      await db.update(sportsSubcategories).set(updateData).where(whereClause);
+    } else {
+      await db.update(sportsSubcategories).set(updateData);
+    }
 
     // If disabling, delete matches for these subcategories so website & DB are clean
-    if (!targetStatus) {
+    if (updateData.status === false) {
       try {
         if (Array.isArray(ids) && ids.length > 0) {
           await db.delete(matches).where(inArray(matches.subcategoryId, ids.map(Number)));
         } else if (categoryId && categoryId !== 'all') {
           await db.delete(matches).where(eq(matches.categoryId, Number(categoryId)));
+        } else if (categoryId === 'all') {
+          await db.delete(matches);
         }
       } catch (delErr) {
         console.error('Error deleting matches on bulk disable:', delErr.message);
@@ -728,7 +786,7 @@ const bulkUpdateSubcategoryStatus = async (req, res, next) => {
 
     return res.status(200).json({
       success: true,
-      message: `Subcategories successfully ${targetStatus ? 'enabled (ON)' : 'disabled (OFF)'}.`,
+      message: `Subcategories successfully updated: ${actionName}.`,
     });
   } catch (error) {
     next(error);
