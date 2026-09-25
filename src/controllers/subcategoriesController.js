@@ -5,7 +5,9 @@ const { sportsSubcategories, sportsCategories, matches } = require('../db/schema
 const { SPORTSDB_API_KEY } = require('../services/sportsDbService');
 
 // Helper to ensure sports_subcategories table exists
+let isSubcatTableEnsured = false;
 const ensureTableExists = async () => {
+  if (isSubcatTableEnsured) return;
   await ensureDatabaseExists();
   const connection = await pool.getConnection();
   await connection.query(`
@@ -65,6 +67,7 @@ const ensureTableExists = async () => {
   }
 
   connection.release();
+  isSubcatTableEnsured = true;
 };
 
 // Get Subcategories (optionally filtered by categoryId, trending, or home)

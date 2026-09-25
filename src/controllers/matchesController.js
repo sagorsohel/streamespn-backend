@@ -308,7 +308,7 @@ const getMatches = async (req, res, next) => {
 // Get Matches for Home Page Featured Hero Banner Carousel
 const getBannerMatches = async (req, res, next) => {
   try {
-    await ensureTableExists();
+    await ensureTableExistsOnce();
 
     const selectFields = {
       id: matches.id,
@@ -865,7 +865,7 @@ const getLiveScores = async (req, res, next) => {
 // Get Single Match by ID or Slug
 const getMatchById = async (req, res, next) => {
   try {
-    await ensureTableExists();
+    await ensureTableExistsOnce();
     const { id } = req.params;
     const { all, admin } = req.query;
     const showAll = all === 'true' || all === '1' || admin === 'true';
