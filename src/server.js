@@ -15,7 +15,7 @@ const startServer = async () => {
     connection.release();
 
     // 3. Automated Boot Migration & Match Sync (100% zero-command-line Hostinger automated sync)
-    const { syncMatchesCore, startDaily12AMScheduler, repairMatchesMissingSubcategoryCore } = require('./controllers/matchesController');
+    const { syncMatchesCore, startDaily12AMScheduler, start10MinSyncScheduler, repairMatchesMissingSubcategoryCore } = require('./controllers/matchesController');
     const { syncAllSubcategoryBadgesCore } = require('./controllers/subcategoriesController');
 
     console.log('🔄 [BOOT] Running automatic database migration and match sync on server boot...');
@@ -42,6 +42,7 @@ const startServer = async () => {
       });
 
     startDaily12AMScheduler();
+    start10MinSyncScheduler();
 
     // 4. Start server with automatic port fallback if port is in use
     const startListening = (portToTry) => {

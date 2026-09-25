@@ -720,6 +720,26 @@ const syncLiveScoresWithSportsDB = async () => {
           updateFields.categoryId = sql`COALESCE(${matches.categoryId}, ${finalCatId})`;
         }
 
+        // 🎬 100% Resolve Media Player Banner from SportsDB (strThumb / strPoster / strBanner / strFanart)
+        const liveEventThumb =
+          (item.strThumb && item.strThumb.trim()) ||
+          (item.strPoster && item.strPoster.trim()) ||
+          (item.strBanner && item.strBanner.trim()) ||
+          (item.strFanart && item.strFanart.trim()) ||
+          null;
+        const liveEventBg =
+          (item.strBanner && item.strBanner.trim()) ||
+          (item.strFanart && item.strFanart.trim()) ||
+          liveEventThumb ||
+          null;
+
+        if (liveEventThumb) {
+          updateFields.playerImage = sql`COALESCE(NULLIF(TRIM(${matches.playerImage}), ''), ${liveEventThumb})`;
+        }
+        if (liveEventBg) {
+          updateFields.bgImage = sql`COALESCE(NULLIF(TRIM(${matches.bgImage}), ''), ${liveEventBg})`;
+        }
+
         const updateRes = await db
           .update(matches)
           .set(updateFields)
@@ -758,8 +778,8 @@ const syncLiveScoresWithSportsDB = async () => {
               matchTime: new Date(item.strTimestamp || Date.now()),
               status: 'live',
               venue: item.strVenue || null,
-              playerImage: item.strThumb || null,
-              bgImage: item.strBanner || null,
+              playerImage: liveEventThumb,
+              bgImage: liveEventBg,
               displayOrder: 0,
               isCustomized: false,
             });
@@ -775,8 +795,8 @@ const syncLiveScoresWithSportsDB = async () => {
 // Get Live Scores, Period & Live Minute Only (Lightweight Polling Endpoint for Real-Time Live Sync)
 const getLiveScores = async (req, res, next) => {
   try {
-    // Auto-sync with SportsDB live score feed (throttled 20s)
-    await syncLiveScoresWithSportsDB();
+    // Auto-sync with SportsDB live score feed in background (non-blocking, throttled 20s)
+    syncLiveScoresWithSportsDB().catch(() => {});
 
     const { all, admin } = req.query;
     const showAll = all === 'true' || all === '1' || admin === 'true';
@@ -1006,10 +1026,99 @@ const getMatchById = async (req, res, next) => {
       });
     }
 
+    const matchObj = found[0];
+
+    // Real-time score check: If match start time has arrived/passed and match is not marked finished,
+    // fetch latest score and status from SportsDB so the user sees real-time score / final score!
+    if (
+      matchObj &&
+      matchObj.sportsdbEventId &&
+      !matchObj.isCustomized &&
+      matchObj.status !== 'finished' &&
+      new Date(matchObj.matchTime) <= new Date()
+    ) {
+      try {
+        const evRes = await axios.get(
+          `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/lookupevent.php?id=${matchObj.sportsdbEventId}`,
+          { timeout: 3000 }
+        );
+        const evData = evRes.data?.events?.[0];
+        if (evData) {
+          const statusStr = (evData.strStatus || '').toLowerCase().trim();
+          let targetStatus = matchObj.status;
+
+          if (
+            statusStr === 'ft' ||
+            statusStr === 'finished' ||
+            statusStr === 'aet' ||
+            statusStr.includes('final')
+          ) {
+            targetStatus = 'finished';
+          } else if (
+            statusStr.includes('1h') ||
+            statusStr.includes('2h') ||
+            statusStr.includes('ht') ||
+            statusStr.includes('live') ||
+            statusStr.includes('in play')
+          ) {
+            targetStatus = 'live';
+          }
+
+          const hScore = evData.intHomeScore !== null && evData.intHomeScore !== undefined ? String(evData.intHomeScore) : matchObj.homeScore;
+          const aScore = evData.intAwayScore !== null && evData.intAwayScore !== undefined ? String(evData.intAwayScore) : matchObj.awayScore;
+
+          // 🎬 Resolve Media Player Banner & Backdrop from SportsDB
+          const lookupThumb =
+            (evData.strThumb && evData.strThumb.trim()) ||
+            (evData.strPoster && evData.strPoster.trim()) ||
+            (evData.strBanner && evData.strBanner.trim()) ||
+            (evData.strFanart && evData.strFanart.trim()) ||
+            null;
+          const lookupBg =
+            (evData.strBanner && evData.strBanner.trim()) ||
+            (evData.strFanart && evData.strFanart.trim()) ||
+            lookupThumb ||
+            null;
+
+          const imageUpdate = {};
+          if ((!matchObj.playerImage || matchObj.playerImage.trim() === '') && lookupThumb) {
+            matchObj.playerImage = lookupThumb;
+            imageUpdate.playerImage = lookupThumb;
+          }
+          if ((!matchObj.bgImage || matchObj.bgImage.trim() === '') && lookupBg) {
+            matchObj.bgImage = lookupBg;
+            imageUpdate.bgImage = lookupBg;
+          }
+
+          if (targetStatus !== matchObj.status || hScore !== matchObj.homeScore || aScore !== matchObj.awayScore || Object.keys(imageUpdate).length > 0) {
+            matchObj.status = targetStatus;
+            matchObj.homeScore = hScore;
+            matchObj.awayScore = aScore;
+            matchObj.livePeriod = evData.strStatus || matchObj.livePeriod;
+            matchObj.liveMinute = evData.strProgress || matchObj.liveMinute;
+
+            await db
+              .update(matches)
+              .set({
+                status: targetStatus,
+                homeScore: hScore,
+                awayScore: aScore,
+                livePeriod: matchObj.livePeriod,
+                liveMinute: matchObj.liveMinute,
+                ...imageUpdate,
+              })
+              .where(eq(matches.id, matchObj.id));
+          }
+        }
+      } catch (lookupErr) {
+        // Silently continue
+      }
+    }
+
     return res.status(200).json({
       success: true,
       data: {
-        match: found[0],
+        match: matchObj,
       },
     });
   } catch (error) {
@@ -1292,30 +1401,82 @@ const reorderMatches = async (req, res, next) => {
   }
 };
 
-// Core Sync Function: Syncs Today & Tomorrow, excludes finished matches, skips existing matches, and deletes past matches
-const syncMatchesCore = async () => {
-  await ensureTableExists();
+let isSyncingCore = false;
 
-  const now = new Date();
-  const today = now.toISOString().split('T')[0];
-  const tomorrow = new Date(now.valueOf() + 86400000).toISOString().split('T')[0];
-
-  const startOfToday = new Date(now);
-  startOfToday.setHours(0, 0, 0, 0);
-
-  // 🧹 1. Clean up / Delete all past matches prior to today (before 00:00:00 AM today)
-  let deletedCount = 0;
+// Midnight 12:00 AM Automated Cleanup Function (with 11:00 PM cutoff rule)
+const cleanupMidnightMatchesCore = async (midnightTime = new Date()) => {
   try {
-    const deleteRes = await db
+    // 11:00 PM cutoff: exactly 1 hour prior to 12:00 AM midnight
+    const cutoff11PM = new Date(midnightTime.getTime() - 60 * 60 * 1000);
+
+    // Rule:
+    // 1. Matches must be 'finished'
+    // 2. Not customized by admin (isCustomized = false)
+    // 3. Finished on or before 11:00 PM:
+    //    - matches.updatedAt <= cutoff11PM
+    //    - OR matchTime started early enough to finish before 11 PM (matchTime <= cutoff11PM - 2.5 hours)
+    // 4. Matches that finished AFTER 11:00 PM (updatedAt > cutoff11PM) are strictly PRESERVED
+    //    and will only be removed during the next midnight's cleanup.
+    // 5. 'live' or 'upcoming' matches are NEVER deleted.
+    const res = await db
       .delete(matches)
-      .where(and(ne(matches.status, 'live'), lt(matches.matchTime, startOfToday)));
-    deletedCount = deleteRes[0]?.affectedRows || 0;
+      .where(
+        and(
+          eq(matches.status, 'finished'),
+          eq(matches.isCustomized, false),
+          or(
+            lte(matches.updatedAt, cutoff11PM),
+            lte(matches.matchTime, new Date(cutoff11PM.getTime() - 2.5 * 3600 * 1000))
+          )
+        )
+      );
+
+    const deletedCount = res[0]?.affectedRows || 0;
     if (deletedCount > 0) {
-      console.log(`🧹 [MATCH SYNC] Cleaned up ${deletedCount} past matches prior to ${today}.`);
+      console.log(`🧹 [MIDNIGHT CLEANUP] Cleaned up ${deletedCount} finished matches ended on/before 11:00 PM (${cutoff11PM.toLocaleTimeString()}).`);
     }
-  } catch (delErr) {
-    console.error('❌ [MATCH SYNC] Error cleaning up past matches:', delErr.message);
+    return deletedCount;
+  } catch (err) {
+    console.error('❌ [MIDNIGHT CLEANUP] Error in cleanupMidnightMatchesCore:', err.message);
+    return 0;
   }
+};
+
+// Core Sync Function: Syncs Today & Tomorrow, excludes finished matches, skips existing matches, and updates live/upcoming matches
+const syncMatchesCore = async () => {
+  if (isSyncingCore) {
+    return { added: 0, preserved: 0, skipped: true, totalFetched: 0 };
+  }
+  isSyncingCore = true;
+
+  try {
+    await ensureTableExists();
+
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const tomorrow = new Date(now.valueOf() + 86400000).toISOString().split('T')[0];
+
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+
+    // 🧹 Clean up only very old obsolete matches (older than 48 hours and finished)
+    // Note: Today's and yesterday's matches are handled safely by the midnight 11 PM cutoff scheduler!
+    let deletedCount = 0;
+    try {
+      const obsoleteThreshold = new Date(now.getTime() - 48 * 3600 * 1000);
+      const deleteRes = await db
+        .delete(matches)
+        .where(
+          and(
+            eq(matches.status, 'finished'),
+            eq(matches.isCustomized, false),
+            lt(matches.matchTime, obsoleteThreshold)
+          )
+        );
+      deletedCount = deleteRes[0]?.affectedRows || 0;
+    } catch (delErr) {
+      // ignore
+    }
 
   // 📡 2. Sync Today and Tomorrow ONLY (2 Days)
   const datesToSync = [today, tomorrow];
@@ -1508,7 +1669,73 @@ const syncMatchesCore = async () => {
       status = 'upcoming';
     }
 
-    // ⛔ 1. EXCLUDE FINISHED MATCHES (Do NOT load ended matches)
+    const existingMatch = (eventId && matchEventMap.get(eventId)) || dbMatches.find((m) => m.slug === generatedSlug);
+
+    // 🎬 Resolve Media Player Banner & Backdrop 100% from TheSportsDB (Priority: strThumb -> strPoster -> strBanner -> strFanart)
+    const eventThumb =
+      (ev.strThumb && ev.strThumb.trim()) ||
+      (ev.strPoster && ev.strPoster.trim()) ||
+      (ev.strBanner && ev.strBanner.trim()) ||
+      (ev.strFanart && ev.strFanart.trim()) ||
+      null;
+
+    const eventBg =
+      (ev.strBanner && ev.strBanner.trim()) ||
+      (ev.strFanart && ev.strFanart.trim()) ||
+      eventThumb ||
+      null;
+
+    if (existingMatch) {
+      preservedCount++;
+      if (!existingMatch.isCustomized) {
+        const newHomeScore = ev.intHomeScore !== null && ev.intHomeScore !== undefined ? String(ev.intHomeScore) : null;
+        const newAwayScore = ev.intAwayScore !== null && ev.intAwayScore !== undefined ? String(ev.intAwayScore) : null;
+        const updateFields = {};
+        let needsUpdate = false;
+
+        // 🎬 100% Ensure Featured Media Player Banner is set from TheSportsDB if missing or empty
+        if ((!existingMatch.playerImage || existingMatch.playerImage.trim() === '') && eventThumb) {
+          updateFields.playerImage = eventThumb;
+          existingMatch.playerImage = eventThumb;
+          needsUpdate = true;
+        }
+        if ((!existingMatch.bgImage || existingMatch.bgImage.trim() === '') && eventBg) {
+          updateFields.bgImage = eventBg;
+          existingMatch.bgImage = eventBg;
+          needsUpdate = true;
+        }
+
+        if (status !== existingMatch.status) {
+          updateFields.status = status;
+          needsUpdate = true;
+        }
+        if (newHomeScore !== null && newHomeScore !== existingMatch.homeScore) {
+          updateFields.homeScore = newHomeScore;
+          needsUpdate = true;
+        }
+        if (newAwayScore !== null && newAwayScore !== existingMatch.awayScore) {
+          updateFields.awayScore = newAwayScore;
+          needsUpdate = true;
+        }
+        if (ev.strStatus && ev.strStatus !== existingMatch.livePeriod) {
+          updateFields.livePeriod = ev.strStatus;
+          needsUpdate = true;
+        }
+        if (ev.strProgress && ev.strProgress !== existingMatch.liveMinute) {
+          updateFields.liveMinute = ev.strProgress;
+          needsUpdate = true;
+        }
+
+        if (needsUpdate) {
+          try {
+            await db.update(matches).set(updateFields).where(eq(matches.id, existingMatch.id));
+          } catch (e) {}
+        }
+      }
+      continue;
+    }
+
+    // ⛔ 1. EXCLUDE FINISHED MATCHES (Do NOT insert newly imported matches if already ended)
     if (status === 'finished') {
       continue;
     }
@@ -1519,12 +1746,6 @@ const syncMatchesCore = async () => {
     endOfTomorrow.setHours(23, 59, 59, 999);
 
     if (matchTimeVal < startOfToday || matchTimeVal > endOfTomorrow) {
-      continue;
-    }
-
-    // ⛔ 3. EXCLUDE EXISTING MATCHES (If already in DB by eventId or slug, DO NOT re-load)
-    if (matchEventMap.has(eventId) || matchSlugSet.has(generatedSlug)) {
-      preservedCount++;
       continue;
     }
 
@@ -1552,8 +1773,8 @@ const syncMatchesCore = async () => {
       matchTime: matchTimeVal,
       status: status,
       venue: ev.strVenue || null,
-      playerImage: ev.strThumb || null,
-      bgImage: ev.strBanner || null,
+      playerImage: eventThumb,
+      bgImage: eventBg,
       referralLink: null,
       displayOrder: maxOrder,
       isCustomized: false,
@@ -1562,12 +1783,15 @@ const syncMatchesCore = async () => {
     addedCount++;
   }
 
-  return {
-    added: addedCount,
-    preserved: preservedCount,
-    deleted: deletedCount,
-    totalFetched: rawEvents.length,
-  };
+    return {
+      added: addedCount,
+      preserved: preservedCount,
+      deleted: deletedCount,
+      totalFetched: rawEvents.length,
+    };
+  } finally {
+    isSyncingCore = false;
+  }
 };
 
 // Express Route Controller: Triggered by Admin "Sync Matches (Today & Tomorrow)" button
@@ -1584,7 +1808,7 @@ const syncMatches = async (req, res, next) => {
   }
 };
 
-// Daily 12:00 AM (Midnight) Automated Background Scheduler
+// Daily 12:00 AM (Midnight) Automated Background Scheduler (with 11:00 PM cutoff rule)
 const startDaily12AMScheduler = () => {
   const scheduleNextRun = () => {
     const now = new Date();
@@ -1601,6 +1825,10 @@ const startDaily12AMScheduler = () => {
     setTimeout(async () => {
       console.log('⏰ [DAILY SYNC CRON] Triggering automated 12:00 AM (Midnight) daily match sync & cleanup...');
       try {
+        // 1. Run midnight cleanup (removes matches finished on or before 11:00 PM)
+        await cleanupMidnightMatchesCore(new Date());
+
+        // 2. Sync upcoming matches for today & tomorrow
         const result = await syncMatchesCore();
         console.log('✅ [DAILY SYNC CRON] Automated 12:00 AM sync completed:', result);
       } catch (err) {
@@ -1611,6 +1839,25 @@ const startDaily12AMScheduler = () => {
   };
 
   scheduleNextRun();
+};
+
+// 10-Minute Periodic Background Match & Score Scheduler
+const start10MinSyncScheduler = () => {
+  console.log('⏱️ [10-MIN SCHEDULER] Background match & score auto-sync initialized (running every 10 minutes).');
+
+  setInterval(async () => {
+    try {
+      console.log('🔄 [10-MIN SYNC] Periodic check for new & updated matches from TheSportsDB...');
+      const result = await syncMatchesCore();
+      if (!result?.skipped) {
+        console.log(`✅ [10-MIN SYNC] Sync done: ${result?.added || 0} new added, ${result?.preserved || 0} updated/preserved.`);
+      }
+      // Also sync live scores for currently ongoing matches
+      await syncLiveScoresWithSportsDB();
+    } catch (err) {
+      console.error('⚠️ [10-MIN SYNC] Periodic sync warning:', err.message);
+    }
+  }, 10 * 60 * 1000); // 10 minutes = 600,000 ms
 };
 
 // Express Route Controller: Delete/Clear ALL matches from database
@@ -1726,7 +1973,9 @@ module.exports = {
   reorderMatches,
   syncMatches,
   syncMatchesCore,
+  cleanupMidnightMatchesCore,
   repairMatchesMissingSubcategoryCore,
   startDaily12AMScheduler,
   startDaily4AMScheduler: startDaily12AMScheduler,
+  start10MinSyncScheduler,
 };
