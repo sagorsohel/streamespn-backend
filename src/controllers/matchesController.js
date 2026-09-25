@@ -1360,6 +1360,8 @@ const syncMatchesCore = async () => {
         matchedCategory = categoryMap.get('ice hockey') || categoryMap.get('hockey');
       } else if (sportName.toLowerCase().includes('baseball')) {
         matchedCategory = categoryMap.get('baseball');
+      } else if (sportName.toLowerCase().includes('golf')) {
+        matchedCategory = categoryMap.get('golf');
       }
     }
 

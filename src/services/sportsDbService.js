@@ -20,6 +20,9 @@ const TARGET_SPORTS = [
   'baseball',
   'ice hockey',
   'hockey',
+  'cricket',
+  'table tennis',
+  'golf',
 ];
 
 const fetchAllSportsFromApi = async () => {
