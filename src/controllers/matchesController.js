@@ -678,6 +678,8 @@ const syncLiveScoresWithSportsDB = async () => {
       if (!matchedCat) {
         continue;
       }
+      const catId = matchedCat.id;
+      let subcatId = null;
       let finalCatId = catId;
       if (item.strLeague) {
         subcatId = await resolveOrCreateSubcategory(catId, item.strLeague, item.idLeague, subcategoryMap);
