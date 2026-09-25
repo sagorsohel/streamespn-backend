@@ -526,7 +526,14 @@ const resolveOrCreateSubcategory = async (catId, leagueName, idLeague, subcatego
   const cleanLeague = leagueName.trim();
   const lowerLeague = cleanLeague.toLowerCase();
 
-  let matchedSubcat = subcategoryMap.get(lowerLeague);
+  const keyWithCat = `${catId}:${lowerLeague}`;
+  let matchedSubcat = subcategoryMap.get(keyWithCat);
+  if (!matchedSubcat) {
+    const rawMatch = subcategoryMap.get(lowerLeague);
+    if (rawMatch && rawMatch.categoryId === catId) {
+      matchedSubcat = rawMatch;
+    }
+  }
 
   if (matchedSubcat) {
     // If it exists but is disabled (status = false), auto-activate it so the live match is visible
@@ -579,6 +586,7 @@ const resolveOrCreateSubcategory = async (catId, leagueName, idLeague, subcatego
       logoUrl: badgeUrl,
       status: true,
     };
+    subcategoryMap.set(keyWithCat, newSubcatObj);
     subcategoryMap.set(lowerLeague, newSubcatObj);
     return newSubcatId;
   } catch (insertErr) {
@@ -587,9 +595,15 @@ const resolveOrCreateSubcategory = async (catId, leagueName, idLeague, subcatego
       const reCheck = await db
         .select()
         .from(sportsSubcategories)
-        .where(sql`LOWER(${sportsSubcategories.name}) = ${lowerLeague}`)
+        .where(
+          and(
+            eq(sportsSubcategories.categoryId, catId),
+            sql`LOWER(${sportsSubcategories.name}) = ${lowerLeague}`
+          )
+        )
         .limit(1);
       if (reCheck.length > 0) {
+        subcategoryMap.set(keyWithCat, reCheck[0]);
         subcategoryMap.set(lowerLeague, reCheck[0]);
         return reCheck[0].id;
       }
@@ -712,6 +726,7 @@ const syncLiveScoresWithSportsDB = async () => {
           .where(
             and(
               eq(matches.isCustomized, false),
+              eq(matches.categoryId, finalCatId),
               or(
                 eq(matches.sportsdbEventId, item.idEvent),
                 and(
@@ -1330,7 +1345,13 @@ const syncMatchesCore = async () => {
   const dbMatches = await db.select().from(matches);
 
   const categoryMap = new Map(dbCategories.map((c) => [c.sportName.toLowerCase().trim(), c]));
-  const subcategoryMap = new Map(dbSubcategories.map((s) => [s.name.toLowerCase().trim(), s]));
+  const subcategoryMap = new Map();
+  dbSubcategories.forEach((s) => {
+    subcategoryMap.set(`${s.categoryId}:${s.name.toLowerCase().trim()}`, s);
+    if (!subcategoryMap.has(s.name.toLowerCase().trim())) {
+      subcategoryMap.set(s.name.toLowerCase().trim(), s);
+    }
+  });
   const matchEventMap = new Map(
     dbMatches.filter((m) => m.sportsdbEventId).map((m) => [m.sportsdbEventId, m])
   );
@@ -1368,7 +1389,16 @@ const syncMatchesCore = async () => {
     }
 
     const lowerLeague = leagueName ? leagueName.toLowerCase() : '';
-    let matchedSubcat = lowerLeague ? subcategoryMap.get(lowerLeague) : null;
+    let matchedSubcat = (matchedCategory && lowerLeague)
+      ? subcategoryMap.get(`${matchedCategory.id}:${lowerLeague}`)
+      : null;
+
+    if (!matchedSubcat && lowerLeague) {
+      const rawSub = subcategoryMap.get(lowerLeague);
+      if (rawSub && (!matchedCategory || rawSub.categoryId === matchedCategory.id)) {
+        matchedSubcat = rawSub;
+      }
+    }
 
     if (!matchedCategory && matchedSubcat) {
       matchedCategory = dbCategories.find((c) => c.id === matchedSubcat.categoryId);
@@ -1407,6 +1437,7 @@ const syncMatchesCore = async () => {
             logoUrl: subcatLogo,
             status: true,
           };
+          subcategoryMap.set(`${categoryId}:${lowerLeague}`, matchedSubcat);
           subcategoryMap.set(lowerLeague, matchedSubcat);
         } catch (subErr) {
           // ignore
