@@ -85,10 +85,18 @@ const adsSettings = mysqlTable('ads_settings', {
   updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
 });
 
+const deletedSubcategories = mysqlTable('deleted_subcategories', {
+  id: serial('id').primaryKey(),
+  categoryId: int('category_id').notNull(),
+  name: varchar('name', { length: 255 }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 module.exports = {
   users,
   sportsCategories,
   sportsSubcategories,
   matches,
   adsSettings,
+  deletedSubcategories,
 };

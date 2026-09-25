@@ -536,18 +536,23 @@ const resolveOrCreateSubcategory = async (catId, leagueName, idLeague, subcatego
   }
 
   if (matchedSubcat) {
-    // If it exists but is disabled (status = false), auto-activate it so the live match is visible
+    // 🛑 If disabled (status = false/0) by admin, respect setting and NEVER auto-activate!
     if (!matchedSubcat.status) {
-      try {
-        await db
-          .update(sportsSubcategories)
-          .set({ status: true })
-          .where(eq(sportsSubcategories.id, matchedSubcat.id));
-        matchedSubcat.status = true;
-      } catch (e) {}
+      return null;
     }
     return matchedSubcat.id;
   }
+
+  // 🛑 Check if permanently deleted/blacklisted by admin
+  try {
+    const [delCheck] = await pool.query(
+      'SELECT id FROM deleted_subcategories WHERE (category_id = ? AND LOWER(name) = ?) OR LOWER(name) = ? LIMIT 1',
+      [catId, lowerLeague, lowerLeague]
+    );
+    if (delCheck && delCheck.length > 0) {
+      return null; // Permanently deleted by admin! DO NOT create it!
+    }
+  } catch (delCheckErr) {}
 
   // Subcategory not found in DB -> Fetch official league badge if available and create it!
   let badgeUrl = null;
@@ -603,6 +608,7 @@ const resolveOrCreateSubcategory = async (catId, leagueName, idLeague, subcatego
         )
         .limit(1);
       if (reCheck.length > 0) {
+        if (!reCheck[0].status) return null; // If inactive, don't return
         subcategoryMap.set(keyWithCat, reCheck[0]);
         subcategoryMap.set(lowerLeague, reCheck[0]);
         return reCheck[0].id;
@@ -627,9 +633,20 @@ const syncLiveScoresWithSportsDB = async () => {
     // Load categories & subcategories from DB for dynamic mapping
     const dbCategories = await db.select().from(sportsCategories);
     const dbSubcategories = await db.select().from(sportsSubcategories);
-    const subcategoryMap = new Map(
-      dbSubcategories.map((s) => [s.name.toLowerCase().trim(), s])
-    );
+    const subcategoryMap = new Map();
+    dbSubcategories.forEach((s) => {
+      subcategoryMap.set(`${s.categoryId}:${s.name.toLowerCase().trim()}`, s);
+      subcategoryMap.set(s.name.toLowerCase().trim(), s);
+    });
+
+    let deletedSubcategoriesSet = new Set();
+    try {
+      const [delRows] = await pool.query('SELECT category_id, name FROM deleted_subcategories');
+      delRows.forEach((r) => {
+        deletedSubcategoriesSet.add(`${r.category_id}:${r.name.toLowerCase().trim()}`);
+        deletedSubcategoriesSet.add(r.name.toLowerCase().trim());
+      });
+    } catch (e) {}
 
     for (const item of data.livescore) {
       if (!item.strHomeTeam || !item.strAwayTeam) continue;
@@ -696,8 +713,25 @@ const syncLiveScoresWithSportsDB = async () => {
       let subcatId = null;
       let finalCatId = catId;
       if (item.strLeague) {
+        const cleanLeague = item.strLeague.trim();
+        const lowerLeague = cleanLeague.toLowerCase();
+
+        // 🛑 Check 1: If deleted/blacklisted by admin, NEVER process or resurrect it!
+        if (deletedSubcategoriesSet.has(`${catId}:${lowerLeague}`) || deletedSubcategoriesSet.has(lowerLeague)) {
+          continue;
+        }
+
+        // 🛑 Check 2: If existing subcategory is disabled (status = false/0) by admin, SKIP!
+        const existingSub = subcategoryMap.get(`${catId}:${lowerLeague}`) || subcategoryMap.get(lowerLeague);
+        if (existingSub && (!existingSub.status || existingSub.status === 0)) {
+          continue;
+        }
+
         subcatId = await resolveOrCreateSubcategory(catId, item.strLeague, item.idLeague, subcategoryMap);
-        const resolvedSub = subcategoryMap.get(item.strLeague.toLowerCase().trim());
+        if (!subcatId) {
+          continue;
+        }
+        const resolvedSub = subcategoryMap.get(lowerLeague);
         if (resolvedSub && resolvedSub.categoryId) {
           finalCatId = resolvedSub.categoryId;
         }
@@ -1192,14 +1226,6 @@ const createMatch = async (req, res, next) => {
       isCustomized: true,
     });
 
-    // Auto-activate subcategory if assigned
-    if (subcategoryId) {
-      await db
-        .update(sportsSubcategories)
-        .set({ status: true })
-        .where(eq(sportsSubcategories.id, Number(subcategoryId)));
-    }
-
     const newMatch = {
       id: result.insertId,
       categoryId: Number(categoryId),
@@ -1313,14 +1339,6 @@ const updateMatch = async (req, res, next) => {
         isCustomized: true, // Lock category against sync overwrites!
       })
       .where(eq(matches.id, Number(id)));
-
-    // Auto-activate subcategory if assigned
-    if (subcategoryId) {
-      await db
-        .update(sportsSubcategories)
-        .set({ status: true })
-        .where(eq(sportsSubcategories.id, Number(subcategoryId)));
-    }
 
     const updated = await db
       .select()
@@ -1513,6 +1531,16 @@ const syncMatchesCore = async () => {
       subcategoryMap.set(s.name.toLowerCase().trim(), s);
     }
   });
+
+  let deletedSubcategoriesSet = new Set();
+  try {
+    const [delRows] = await pool.query('SELECT category_id, name FROM deleted_subcategories');
+    delRows.forEach((r) => {
+      deletedSubcategoriesSet.add(`${r.category_id}:${r.name.toLowerCase().trim()}`);
+      deletedSubcategoriesSet.add(r.name.toLowerCase().trim());
+    });
+  } catch (e) {}
+
   const matchEventMap = new Map(
     dbMatches.filter((m) => m.sportsdbEventId).map((m) => [m.sportsdbEventId, m])
   );
@@ -1571,6 +1599,14 @@ const syncMatchesCore = async () => {
     let subcategoryId = null;
 
     if (leagueName) {
+      const keyWithCat = `${categoryId}:${lowerLeague}`;
+
+      // 🛑 Permanent Admin Delete Protection:
+      // If this subcategory was deleted/removed by admin, NEVER resurrect it!
+      if (deletedSubcategoriesSet.has(keyWithCat) || deletedSubcategoriesSet.has(lowerLeague)) {
+        continue;
+      }
+
       // 🛑 Permanent Admin Disable Protection:
       // If this subcategory was disabled (status = false/0) by admin:
       // DO NOT sync or import matches for it until admin explicitly enables it!
@@ -1978,4 +2014,5 @@ module.exports = {
   startDaily12AMScheduler,
   startDaily4AMScheduler: startDaily12AMScheduler,
   start10MinSyncScheduler,
+  resolveOrCreateSubcategory,
 };

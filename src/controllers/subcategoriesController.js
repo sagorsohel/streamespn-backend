@@ -50,6 +50,20 @@ const ensureTableExists = async () => {
     // Column already exists
   }
 
+  try {
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS \`deleted_subcategories\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`category_id\` INT NOT NULL,
+        \`name\` VARCHAR(255) NOT NULL,
+        \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY \`uniq_cat_name\` (\`category_id\`, \`name\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+  } catch (err) {
+    // Table already exists or error
+  }
+
   connection.release();
 };
 
@@ -282,6 +296,14 @@ const createSubcategory = async (req, res, next) => {
       displayOrder: displayOrder !== undefined ? Number(displayOrder) : maxOrder + 1,
       isCustomized: true,
     });
+
+    // If previously marked as deleted, remove from deleted_subcategories blacklist
+    try {
+      await pool.query(
+        'DELETE FROM deleted_subcategories WHERE category_id = ? AND LOWER(name) = ?',
+        [Number(categoryId), name.trim().toLowerCase()]
+      );
+    } catch (unDelErr) {}
 
     const newSubcategory = {
       id: result.insertId,
@@ -570,11 +592,32 @@ const deleteSubcategory = async (req, res, next) => {
       });
     }
 
+    const subcatName = existing[0].name.trim();
+    const catId = existing[0].categoryId;
+
+    // 1. Delete all matches belonging to this subcategory so no orphan events remain
+    try {
+      await db.delete(matches).where(eq(matches.subcategoryId, Number(id)));
+    } catch (mErr) {
+      console.error('Error removing matches for deleted subcategory:', mErr.message);
+    }
+
+    // 2. Add to deleted_subcategories blacklist so background sync & live sync NEVER recreate it!
+    try {
+      await pool.query(
+        'INSERT IGNORE INTO deleted_subcategories (category_id, name) VALUES (?, ?)',
+        [catId, subcatName.toLowerCase()]
+      );
+    } catch (delLogErr) {
+      console.error('Error recording deleted subcategory tombstone:', delLogErr.message);
+    }
+
+    // 3. Delete the subcategory itself
     await db.delete(sportsSubcategories).where(eq(sportsSubcategories.id, Number(id)));
 
     return res.status(200).json({
       success: true,
-      message: `Subcategory "${existing[0].name}" deleted successfully.`,
+      message: `Subcategory "${subcatName}" deleted permanently and removed from sync.`,
     });
   } catch (error) {
     next(error);
@@ -609,6 +652,16 @@ const syncSingleCategoryLeagues = async (category) => {
     .from(sportsSubcategories)
     .where(eq(sportsSubcategories.categoryId, Number(category.id)));
 
+  // Load deleted/blacklisted leagues for this category so sync never restores them
+  let deletedLeaguesSet = new Set();
+  try {
+    const [delRows] = await pool.query(
+      'SELECT name FROM deleted_subcategories WHERE category_id = ?',
+      [Number(category.id)]
+    );
+    delRows.forEach((r) => deletedLeaguesSet.add(r.name.toLowerCase().trim()));
+  } catch (delErr) {}
+
   const existingMap = new Map(existingSubcategories.map((s) => [s.name.toLowerCase().trim(), s]));
   let syncedCount = 0;
   let updatedLogosCount = 0;
@@ -617,8 +670,14 @@ const syncSingleCategoryLeagues = async (category) => {
     const name = league.strLeague?.trim();
     if (!name) continue;
 
-    const badgeLogo = league.strBadge || league.strLogo || null;
     const lowerName = name.toLowerCase();
+
+    // Skip leagues permanently deleted by admin!
+    if (deletedLeaguesSet.has(lowerName)) {
+      continue;
+    }
+
+    const badgeLogo = league.strBadge || league.strLogo || null;
 
     if (existingMap.has(lowerName)) {
       const existing = existingMap.get(lowerName);
