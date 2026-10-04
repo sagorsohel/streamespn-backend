@@ -10,6 +10,7 @@ const {
   deleteAllMatches,
   reorderMatches,
   syncMatches,
+  syncChinaOpenMatches,
 } = require('../controllers/matchesController');
 const { verifyToken } = require('../middleware/auth');
 
@@ -18,6 +19,8 @@ const router = express.Router();
 router.get('/', getMatches);
 router.get('/banner', getBannerMatches);
 router.get('/live-scores', getLiveScores);
+router.post('/sync-china-open', verifyToken, syncChinaOpenMatches);
+router.get('/sync-china-open', syncChinaOpenMatches); // allow automated cron/webhook triggers
 router.get('/:id', getMatchById);
 router.post('/', verifyToken, createMatch);
 router.post('/sync', verifyToken, syncMatches);

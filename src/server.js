@@ -17,11 +17,19 @@ const startServer = async () => {
     // 3. Automated Boot Migration & Match Sync (100% zero-command-line Hostinger automated sync)
     const { syncMatchesCore, startDaily12AMScheduler, start10MinSyncScheduler, repairMatchesMissingSubcategoryCore } = require('./controllers/matchesController');
     const { syncAllSubcategoryBadgesCore } = require('./controllers/subcategoriesController');
+    const { startHourlyChinaOpenSyncScheduler, syncChinaOpenMatchesCore } = require('./services/chinaOpenSyncService');
 
     console.log('🔄 [BOOT] Running automatic database migration and match sync on server boot...');
     syncMatchesCore()
       .then((res) => {
         console.log('✅ [BOOT] Match sync on server boot completed successfully:', res);
+        // Sync China Open tennis matches (daily & real-time live scores)
+        return syncChinaOpenMatchesCore();
+      })
+      .then((chinaRes) => {
+        if (chinaRes?.totalSynced > 0) {
+          console.log(`✅ [BOOT] Automatically synced ${chinaRes.totalSynced} China Open matches.`);
+        }
         // Verify and sync any missing or new subcategory badges in background
         return syncAllSubcategoryBadgesCore();
       })
@@ -43,6 +51,7 @@ const startServer = async () => {
 
     startDaily12AMScheduler();
     start10MinSyncScheduler();
+    startHourlyChinaOpenSyncScheduler();
 
     // 4. Start server with automatic port fallback if port is in use
     const startListening = (portToTry) => {

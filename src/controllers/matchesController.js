@@ -1844,6 +1844,21 @@ const syncMatches = async (req, res, next) => {
   }
 };
 
+// Express Route Controller: Manually trigger China Open sync (Men & Women)
+const syncChinaOpenMatches = async (req, res, next) => {
+  try {
+    const { syncChinaOpenMatchesCore } = require('../services/chinaOpenSyncService');
+    const result = await syncChinaOpenMatchesCore();
+    return res.status(200).json({
+      success: true,
+      message: 'China Open matches synced successfully.',
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Daily 12:00 AM (Midnight) Automated Background Scheduler (with 11:00 PM cutoff rule)
 const startDaily12AMScheduler = () => {
   const scheduleNextRun = () => {
@@ -1867,6 +1882,10 @@ const startDaily12AMScheduler = () => {
         // 2. Sync upcoming matches for today & tomorrow
         const result = await syncMatchesCore();
         console.log('✅ [DAILY SYNC CRON] Automated 12:00 AM sync completed:', result);
+
+        // 3. Sync daily China Open matches (Men & Women)
+        const { syncChinaOpenMatchesCore } = require('../services/chinaOpenSyncService');
+        await syncChinaOpenMatchesCore();
       } catch (err) {
         console.error('❌ [DAILY SYNC CRON] Automated sync error:', err.message);
       }
@@ -2014,5 +2033,6 @@ module.exports = {
   startDaily12AMScheduler,
   startDaily4AMScheduler: startDaily12AMScheduler,
   start10MinSyncScheduler,
+  syncChinaOpenMatches,
   resolveOrCreateSubcategory,
 };
