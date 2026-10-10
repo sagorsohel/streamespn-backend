@@ -135,9 +135,10 @@ const getMatches = async (req, res, next) => {
   try {
     await ensureTableExistsOnce();
     syncLiveScoresWithSportsDB().catch(() => {});
-    const { status, tab, categoryId, subcategoryId, page, limit, all, admin, home } = req.query;
+    const { status, tab, categoryId, subcategoryId, page, limit, all, admin, home, search, q } = req.query;
     const filterTab = tab || status;
     const showAll = all === 'true' || all === '1' || admin === 'true';
+    const searchTerm = (search || q || '').trim();
 
     const now = new Date();
     const startOfToday = new Date(now);
@@ -167,15 +168,38 @@ const getMatches = async (req, res, next) => {
       conditions.push(or(isNull(matches.subcategoryId), eq(sportsSubcategories.showOnHome, true)));
     }
 
+    // Search query filter (matches home team, away team, title, category, or subcategory)
+    if (searchTerm) {
+      const searchPattern = `%${searchTerm.toLowerCase()}%`;
+      conditions.push(
+        or(
+          sql`LOWER(${matches.homeTeam}) LIKE ${searchPattern}`,
+          sql`LOWER(${matches.awayTeam}) LIKE ${searchPattern}`,
+          sql`LOWER(${matches.title}) LIKE ${searchPattern}`,
+          sql`LOWER(${sportsCategories.sportName}) LIKE ${searchPattern}`,
+          sql`LOWER(${sportsSubcategories.name}) LIKE ${searchPattern}`
+        )
+      );
+    }
+
     if (filterTab === 'live') {
       // Live matches: ALWAYS show regardless of matchTime / start time
       conditions.push(eq(matches.status, 'live'));
     } else if (filterTab === 'upcoming') {
-      conditions.push(and(eq(matches.status, 'upcoming'), gte(matches.matchTime, queryRangeStart), lte(matches.matchTime, endOfToday)));
+      if (searchTerm) {
+        conditions.push(eq(matches.status, 'upcoming'));
+      } else {
+        conditions.push(and(eq(matches.status, 'upcoming'), gte(matches.matchTime, queryRangeStart), lte(matches.matchTime, endOfToday)));
+      }
     } else if (filterTab === 'nextDay' || filterTab === 'tomorrow') {
       conditions.push(and(ne(matches.status, 'finished'), ne(matches.status, 'live'), gte(matches.matchTime, startOfTomorrow), lte(matches.matchTime, queryRangeEnd)));
     } else if (filterTab === 'finished') {
       conditions.push(eq(matches.status, 'finished'));
+    } else if (searchTerm) {
+      // When searching without a specific tab, show active matches (live & upcoming)
+      if (!showAll) {
+        conditions.push(ne(matches.status, 'finished'));
+      }
     } else if (!showAll) {
       // For public website:
       // 1. Live matches: ALWAYS show, even if matchTime was from earlier / older.
