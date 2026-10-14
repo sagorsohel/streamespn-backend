@@ -1,6 +1,6 @@
 require('dotenv').config();
 const app = require('./app');
-const { pool, ensureDatabaseExists } = require('./db');
+const { pool, ensureDatabaseExists, ensureDatabaseIndexes } = require('./db');
 
 const PORT = process.env.PORT || 5000;
 
@@ -9,13 +9,21 @@ const startServer = async () => {
     // 1. Ensure database exists
     await ensureDatabaseExists();
 
-    // 2. Check DB connection
+    // 2. Check DB connection & initialize database indexes for high performance
     const connection = await pool.getConnection();
     console.log('✅ Database connected successfully via MySQL pool!');
     connection.release();
 
+    await ensureDatabaseIndexes();
+
     // 3. Automated Boot Migration & Match Sync (100% zero-command-line Hostinger automated sync)
-    const { syncMatchesCore, startDaily12AMScheduler, start10MinSyncScheduler, repairMatchesMissingSubcategoryCore } = require('./controllers/matchesController');
+    const {
+      syncMatchesCore,
+      startDaily12AMScheduler,
+      start10MinSyncScheduler,
+      startLiveScoreBackgroundScheduler,
+      repairMatchesMissingSubcategoryCore,
+    } = require('./controllers/matchesController');
     const { syncAllSubcategoryBadgesCore } = require('./controllers/subcategoriesController');
     const { startHourlyChinaOpenSyncScheduler, syncChinaOpenMatchesCore } = require('./services/chinaOpenSyncService');
 
@@ -52,6 +60,7 @@ const startServer = async () => {
     startDaily12AMScheduler();
     start10MinSyncScheduler();
     startHourlyChinaOpenSyncScheduler();
+    startLiveScoreBackgroundScheduler();
 
     // 4. Start server with automatic port fallback if port is in use
     const startListening = (portToTry) => {

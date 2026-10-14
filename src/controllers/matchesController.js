@@ -130,15 +130,42 @@ const ensureTableExistsOnce = async () => {
   }
 };
 
+let cachedBannerMatches = null;
+let lastBannerFetchTime = 0;
+const BANNER_CACHE_TTL = 20 * 1000; // 20s
+
+const matchesCacheMap = new Map();
+const MATCHES_CACHE_TTL = 10 * 1000; // 10s
+
+const clearMatchesCache = () => {
+  cachedBannerMatches = null;
+  lastBannerFetchTime = 0;
+  matchesCacheMap.clear();
+};
+
 // Get All Matches (with status tab, category filter, search)
 const getMatches = async (req, res, next) => {
   try {
-    await ensureTableExistsOnce();
-    syncLiveScoresWithSportsDB().catch(() => {});
     const { status, tab, categoryId, subcategoryId, page, limit, all, admin, home, search, q } = req.query;
     const filterTab = tab || status;
     const showAll = all === 'true' || all === '1' || admin === 'true';
     const searchTerm = (search || q || '').trim();
+
+    const isPublicPage1 = (Number(page) || 1) === 1 && !searchTerm && !showAll;
+    const cacheKey = `${filterTab || 'default'}_${categoryId || 'all'}_${subcategoryId || 'all'}_${limit || 'default'}_${home || 'false'}`;
+    if (isPublicPage1) {
+      const cached = matchesCacheMap.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < MATCHES_CACHE_TTL) {
+        res.setHeader('Cache-Control', 'public, max-age=10, s-maxage=10, stale-while-revalidate=15');
+        return res.status(200).json({
+          success: true,
+          count: cached.data.length,
+          data: { matches: cached.data },
+        });
+      }
+    }
+
+    await ensureTableExistsOnce();
 
     const now = new Date();
     const startOfToday = new Date(now);
@@ -317,6 +344,11 @@ const getMatches = async (req, res, next) => {
 
     const results = await query;
 
+    if (isPublicPage1) {
+      matchesCacheMap.set(cacheKey, { timestamp: Date.now(), data: results });
+      res.setHeader('Cache-Control', 'public, max-age=10, s-maxage=10, stale-while-revalidate=15');
+    }
+
     return res.status(200).json({
       success: true,
       count: results.length,
@@ -332,7 +364,19 @@ const getMatches = async (req, res, next) => {
 // Get Matches for Home Page Featured Hero Banner Carousel
 const getBannerMatches = async (req, res, next) => {
   try {
+    if (cachedBannerMatches && (Date.now() - lastBannerFetchTime < BANNER_CACHE_TTL)) {
+      res.setHeader('Cache-Control', 'public, max-age=20, s-maxage=20, stale-while-revalidate=30');
+      return res.status(200).json(cachedBannerMatches);
+    }
+
     await ensureTableExistsOnce();
+
+    const sendBanner = (payload) => {
+      cachedBannerMatches = payload;
+      lastBannerFetchTime = Date.now();
+      res.setHeader('Cache-Control', 'public, max-age=20, s-maxage=20, stale-while-revalidate=30');
+      return res.status(200).json(payload);
+    };
 
     const selectFields = {
       id: matches.id,
@@ -420,7 +464,7 @@ const getBannerMatches = async (req, res, next) => {
         .limit(10);
 
       if (bannerMatches.length > 0) {
-        return res.status(200).json({
+        return sendBanner({
           success: true,
           source: 'manual_banner',
           count: bannerMatches.length,
@@ -459,7 +503,7 @@ const getBannerMatches = async (req, res, next) => {
         .limit(10);
 
       if (matchesFromTop.length > 0) {
-        return res.status(200).json({
+        return sendBanner({
           success: true,
           source: 'top_leagues_fallback',
           count: matchesFromTop.length,
@@ -486,7 +530,7 @@ const getBannerMatches = async (req, res, next) => {
       .orderBy(statusOrder, asc(matches.matchTime))
       .limit(10);
 
-    return res.status(200).json({
+    return sendBanner({
       success: true,
       source: 'general_fallback',
       count: fallbackMatches.length,
@@ -853,9 +897,6 @@ const syncLiveScoresWithSportsDB = async () => {
 // Get Live Scores, Period & Live Minute Only (Lightweight Polling Endpoint for Real-Time Live Sync)
 const getLiveScores = async (req, res, next) => {
   try {
-    // Auto-sync with SportsDB live score feed in background (non-blocking, throttled 20s)
-    syncLiveScoresWithSportsDB().catch(() => {});
-
     const { all, admin } = req.query;
     const showAll = all === 'true' || all === '1' || admin === 'true';
 
@@ -877,6 +918,7 @@ const getLiveScores = async (req, res, next) => {
       .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
       .where(and(...conditions));
 
+    res.setHeader('Cache-Control', 'public, max-age=5, s-maxage=5, stale-while-revalidate=10');
     return res.status(200).json({
       success: true,
       data: liveMatches,
@@ -1273,6 +1315,7 @@ const createMatch = async (req, res, next) => {
       isCustomized: true,
     };
 
+    clearMatchesCache();
     return res.status(201).json({
       success: true,
       message: 'Match created successfully and parent subcategory activated.',
@@ -1370,6 +1413,7 @@ const updateMatch = async (req, res, next) => {
       .where(eq(matches.id, Number(id)))
       .limit(1);
 
+    clearMatchesCache();
     return res.status(200).json({
       success: true,
       message: 'Match updated successfully and subcategory status updated.',
@@ -1402,6 +1446,7 @@ const deleteMatch = async (req, res, next) => {
     }
 
     await db.delete(matches).where(eq(matches.id, Number(id)));
+    clearMatchesCache();
 
     return res.status(200).json({
       success: true,
@@ -1434,6 +1479,7 @@ const reorderMatches = async (req, res, next) => {
       }
     }
 
+    clearMatchesCache();
     return res.status(200).json({
       success: true,
       message: 'Matches reordered successfully.',
@@ -1843,6 +1889,7 @@ const syncMatchesCore = async () => {
     addedCount++;
   }
 
+    clearMatchesCache();
     return {
       added: addedCount,
       preserved: preservedCount,
@@ -1948,6 +1995,7 @@ const deleteAllMatches = async (req, res, next) => {
     await connection.query('UPDATE `sports_subcategories` SET `status` = 0;');
     connection.release();
 
+    clearMatchesCache();
     return res.status(200).json({
       success: true,
       message: 'All match data removed successfully! Subcategories status reset.',
@@ -2040,6 +2088,18 @@ const repairMatchesMissingSubcategoryCore = async () => {
   }
 };
 
+// Dedicated background live score sync scheduler (every 30 seconds)
+const startLiveScoreBackgroundScheduler = () => {
+  console.log('⚡ [LIVE SCORE SCHEDULER] Background live score auto-sync initialized (running every 30 seconds).');
+  setInterval(async () => {
+    try {
+      await syncLiveScoresWithSportsDB();
+    } catch (err) {
+      // background error ignore
+    }
+  }, 30 * 1000);
+};
+
 module.exports = {
   getMatches,
   getBannerMatches,
@@ -2057,6 +2117,8 @@ module.exports = {
   startDaily12AMScheduler,
   startDaily4AMScheduler: startDaily12AMScheduler,
   start10MinSyncScheduler,
+  startLiveScoreBackgroundScheduler,
+  clearMatchesCache,
   syncChinaOpenMatches,
   resolveOrCreateSubcategory,
 };

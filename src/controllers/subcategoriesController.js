@@ -70,11 +70,36 @@ const ensureTableExists = async () => {
   isSubcatTableEnsured = true;
 };
 
+const subcategoriesCacheMap = new Map();
+const SUBCAT_CACHE_TTL = 30 * 1000; // 30 seconds TTL
+
+const clearSubcategoriesCache = () => {
+  subcategoriesCacheMap.clear();
+};
+
 // Get Subcategories (optionally filtered by categoryId, trending, or home)
 const getSubcategories = async (req, res, next) => {
   try {
-    await ensureTableExists();
     const { categoryId, trending, status, activeOnly, all, admin, home } = req.query;
+
+    const isPublicQuery = !admin && all !== 'true' && all !== '1';
+    const cacheKey = `${categoryId || 'all'}_${trending || 'false'}_${status || 'default'}_${activeOnly || 'false'}_${home || 'false'}_${req.query.minMatches || 'default'}`;
+
+    if (isPublicQuery) {
+      const cached = subcategoriesCacheMap.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < SUBCAT_CACHE_TTL) {
+        res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=30, stale-while-revalidate=60');
+        return res.status(200).json({
+          success: true,
+          count: cached.data.length,
+          data: {
+            subcategories: cached.data,
+          },
+        });
+      }
+    }
+
+    await ensureTableExists();
 
     const now = new Date();
     const startOfToday = new Date(now);
@@ -225,6 +250,14 @@ const getSubcategories = async (req, res, next) => {
       results = await fallbackQuery;
     }
 
+    if (isPublicQuery) {
+      subcategoriesCacheMap.set(cacheKey, {
+        timestamp: Date.now(),
+        data: results,
+      });
+      res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=30, stale-while-revalidate=60');
+    }
+
     return res.status(200).json({
       success: true,
       count: results.length,
@@ -322,6 +355,7 @@ const createSubcategory = async (req, res, next) => {
       isCustomized: true,
     };
 
+    clearSubcategoriesCache();
     return res.status(201).json({
       success: true,
       message: 'Subcategory created successfully.',
@@ -385,6 +419,7 @@ const updateSubcategory = async (req, res, next) => {
       .where(eq(sportsSubcategories.id, Number(id)))
       .limit(1);
 
+    clearSubcategoriesCache();
     return res.status(200).json({
       success: true,
       message: 'Subcategory updated successfully.',
@@ -437,6 +472,7 @@ const toggleSubcategoryStatus = async (req, res, next) => {
       }
     }
 
+    clearSubcategoriesCache();
     return res.status(200).json({
       success: true,
       message: `Subcategory "${existing[0].name}" status toggled to ${newStatus ? 'ON (Active)' : 'OFF (Inactive)'}.`,
@@ -479,6 +515,7 @@ const toggleSubcategoryTrending = async (req, res, next) => {
       })
       .where(eq(sportsSubcategories.id, Number(id)));
 
+    clearSubcategoriesCache();
     return res.status(200).json({
       success: true,
       message: `Subcategory "${existing[0].name}" trending toggled to ${newTrending ? 'ON (Trending)' : 'OFF (Normal)'}.`,
@@ -521,6 +558,7 @@ const toggleSubcategoryBanner = async (req, res, next) => {
       })
       .where(eq(sportsSubcategories.id, Number(id)));
 
+    clearSubcategoriesCache();
     return res.status(200).json({
       success: true,
       message: `Subcategory "${existing[0].name}" home banner set to ${newBanner ? 'ON ⭐ (Shown in Home Banner Carousel)' : 'OFF (Normal)'}.`,
@@ -563,6 +601,7 @@ const toggleSubcategoryHome = async (req, res, next) => {
       })
       .where(eq(sportsSubcategories.id, Number(id)));
 
+    clearSubcategoriesCache();
     return res.status(200).json({
       success: true,
       message: `Subcategory "${existing[0].name}" homepage visibility set to ${newShowOnHome ? 'ON 🏠 (Shown on Homepage)' : 'OFF (Hidden from Homepage)'}.`,
@@ -931,4 +970,5 @@ module.exports = {
   syncAllSubcategoryBadges,
   syncAllSubcategoryBadgesCore,
   bulkUpdateSubcategoryStatus,
+  clearSubcategoriesCache,
 };

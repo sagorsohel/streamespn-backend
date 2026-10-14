@@ -3,28 +3,43 @@ const { db, pool, ensureDatabaseExists } = require('../db');
 const { sportsCategories } = require('../db/schema');
 const { getTargetSportsFiltered } = require('../services/sportsDbService');
 
-// Helper to ensure table exists in MySQL before running queries
+let isSportsTableInitialized = false;
+let cachedSports = null;
+let lastSportsFetchTime = 0;
+const SPORTS_CACHE_TTL = 60 * 1000; // 60 seconds
+
+const clearSportsCache = () => {
+  cachedSports = null;
+  lastSportsFetchTime = 0;
+};
+
+// Helper to ensure table exists in MySQL before running queries (runs once only)
 const ensureTableExists = async () => {
+  if (isSportsTableInitialized) return;
   await ensureDatabaseExists();
   const connection = await pool.getConnection();
-  await connection.query(`
-    CREATE TABLE IF NOT EXISTS \`sports_categories\` (
-      \`id\` INT AUTO_INCREMENT PRIMARY KEY,
-      \`sport_name\` VARCHAR(255) NOT NULL,
-      \`sport_format\` VARCHAR(100) DEFAULT 'Team',
-      \`thumb_url\` TEXT,
-      \`icon_url\` TEXT,
-      \`description\` TEXT,
-      \`player_image\` TEXT,
-      \`bg_image\` TEXT,
-      \`referral_link\` TEXT,
-      \`display_order\` INT NOT NULL DEFAULT 0,
-      \`is_customized\` TINYINT(1) NOT NULL DEFAULT 0,
-      \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      \`updated_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-  `);
-  connection.release();
+  try {
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS \`sports_categories\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`sport_name\` VARCHAR(255) NOT NULL,
+        \`sport_format\` VARCHAR(100) DEFAULT 'Team',
+        \`thumb_url\` TEXT,
+        \`icon_url\` TEXT,
+        \`description\` TEXT,
+        \`player_image\` TEXT,
+        \`bg_image\` TEXT,
+        \`referral_link\` TEXT,
+        \`display_order\` INT NOT NULL DEFAULT 0,
+        \`is_customized\` TINYINT(1) NOT NULL DEFAULT 0,
+        \`created_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    isSportsTableInitialized = true;
+  } finally {
+    connection.release();
+  }
 };
 
 // Sync Sports Categories from TheSportsDB API
@@ -98,6 +113,7 @@ const syncSports = async (req, res, next) => {
       }
     }
 
+    clearSportsCache();
     return res.status(200).json({
       success: true,
       message: `Sync completed! Added: ${addedCount}, Updated: ${updatedCount}, Preserved (Admin Locked): ${preservedCount}.`,
@@ -113,15 +129,31 @@ const syncSports = async (req, res, next) => {
   }
 };
 
-// Get All Sports Categories (sorted by displayOrder)
+// Get All Sports Categories (sorted by displayOrder, cached in RAM for ultra-fast response)
 const getSports = async (req, res, next) => {
   try {
+    const now = Date.now();
+    if (cachedSports && (now - lastSportsFetchTime < SPORTS_CACHE_TTL)) {
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=60, stale-while-revalidate=120');
+      return res.status(200).json({
+        success: true,
+        count: cachedSports.length,
+        data: {
+          sports: cachedSports,
+        },
+      });
+    }
+
     await ensureTableExists();
     const categories = await db
       .select()
       .from(sportsCategories)
       .orderBy(asc(sportsCategories.displayOrder));
 
+    cachedSports = categories;
+    lastSportsFetchTime = now;
+
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=60, stale-while-revalidate=120');
     return res.status(200).json({
       success: true,
       count: categories.length,
@@ -217,6 +249,7 @@ const createSport = async (req, res, next) => {
       isCustomized: true,
     };
 
+    clearSportsCache();
     return res.status(201).json({
       success: true,
       message: 'Custom sport category created successfully.',
@@ -281,6 +314,7 @@ const updateSport = async (req, res, next) => {
       .where(eq(sportsCategories.id, Number(id)))
       .limit(1);
 
+    clearSportsCache();
     return res.status(200).json({
       success: true,
       message: 'Sport category updated and locked against sync overwrites.',
@@ -313,7 +347,7 @@ const deleteSport = async (req, res, next) => {
     }
 
     await db.delete(sportsCategories).where(eq(sportsCategories.id, Number(id)));
-
+    clearSportsCache();
     return res.status(200).json({
       success: true,
       message: `Sport category "${existing[0].sportName}" deleted successfully.`,
@@ -350,6 +384,7 @@ const reorderSports = async (req, res, next) => {
       .from(sportsCategories)
       .orderBy(asc(sportsCategories.displayOrder));
 
+    clearSportsCache();
     return res.status(200).json({
       success: true,
       message: 'Sports categories reordered successfully.',
@@ -370,4 +405,5 @@ module.exports = {
   updateSport,
   deleteSport,
   reorderSports,
+  clearSportsCache,
 };

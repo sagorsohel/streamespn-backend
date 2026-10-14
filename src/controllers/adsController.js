@@ -124,7 +124,7 @@ warmUpAdsCache();
 
 // DEDICATED ULTRA-FAST ADS ENDPOINT (0ms RAM response + Browser HTTP Cache)
 const getAdsFast = (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=60, stale-while-revalidate=120');
   const defaultSettings = {
     id: 1,
     headAds: '',
