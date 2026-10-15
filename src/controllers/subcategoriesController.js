@@ -66,6 +66,10 @@ const ensureTableExists = async () => {
     // Table already exists or error
   }
 
+  try {
+    await connection.query(`CREATE INDEX \`idx_subcat_cat_status\` ON \`sports_subcategories\` (\`category_id\`, \`status\`);`);
+  } catch (err) {}
+
   connection.release();
   isSubcatTableEnsured = true;
 };

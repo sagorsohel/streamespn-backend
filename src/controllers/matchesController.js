@@ -45,28 +45,33 @@ let isSlugMigrationDone = false;
 const cleanAndMigrateExistingSlugs = async () => {
   if (isSlugMigrationDone) return;
   isSlugMigrationDone = true;
-  try {
-    const allDbMatches = await db
-      .select({
-        id: matches.id,
-        homeTeam: matches.homeTeam,
-        awayTeam: matches.awayTeam,
-        title: matches.title,
-        matchTime: matches.matchTime,
-        sportsdbEventId: matches.sportsdbEventId,
-        slug: matches.slug,
-      })
-      .from(matches);
+  // Non-blocking background migration for missing slugs
+  setImmediate(async () => {
+    try {
+      const missingSlugs = await db
+        .select({
+          id: matches.id,
+          homeTeam: matches.homeTeam,
+          awayTeam: matches.awayTeam,
+          title: matches.title,
+          matchTime: matches.matchTime,
+          sportsdbEventId: matches.sportsdbEventId,
+          slug: matches.slug,
+        })
+        .from(matches)
+        .where(or(isNull(matches.slug), eq(matches.slug, '')))
+        .limit(200);
 
-    for (const m of allDbMatches) {
-      const clean = generateCleanMatchSlug(m.homeTeam, m.awayTeam, m.title, m.matchTime, m.sportsdbEventId || m.id);
-      if (clean && clean !== m.slug) {
-        await db.update(matches).set({ slug: clean }).where(eq(matches.id, m.id));
+      for (const m of missingSlugs) {
+        const clean = generateCleanMatchSlug(m.homeTeam, m.awayTeam, m.title, m.matchTime, m.sportsdbEventId || m.id);
+        if (clean && clean !== m.slug) {
+          await db.update(matches).set({ slug: clean }).where(eq(matches.id, m.id));
+        }
       }
+    } catch (err) {
+      // ignore
     }
-  } catch (err) {
-    // ignore
-  }
+  });
 };
 
 // Helper to ensure matches table exists & auto-activate subcategories with matches
@@ -115,6 +120,31 @@ const ensureTableExists = async () => {
 
   try {
     await connection.query(`ALTER TABLE \`matches\` ADD COLUMN \`live_period\` VARCHAR(50);`);
+  } catch (e) {}
+
+  // Database performance indexes for single-digit ms queries
+  try {
+    await connection.query(`CREATE INDEX \`idx_matches_category_id\` ON \`matches\` (\`category_id\`);`);
+  } catch (e) {}
+
+  try {
+    await connection.query(`CREATE INDEX \`idx_matches_subcategory_id\` ON \`matches\` (\`subcategory_id\`);`);
+  } catch (e) {}
+
+  try {
+    await connection.query(`CREATE INDEX \`idx_matches_cat_sub\` ON \`matches\` (\`category_id\`, \`subcategory_id\`);`);
+  } catch (e) {}
+
+  try {
+    await connection.query(`CREATE INDEX \`idx_matches_status_time\` ON \`matches\` (\`status\`, \`match_time\`);`);
+  } catch (e) {}
+
+  try {
+    await connection.query(`CREATE INDEX \`idx_matches_slug\` ON \`matches\` (\`slug\`);`);
+  } catch (e) {}
+
+  try {
+    await connection.query(`CREATE INDEX \`idx_subcat_cat_status\` ON \`sports_subcategories\` (\`category_id\`, \`status\`);`);
   } catch (e) {}
 
   connection.release();
