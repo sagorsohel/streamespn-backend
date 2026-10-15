@@ -19,6 +19,7 @@ const startServer = async () => {
     // 3. Automated Boot Migration & Match Sync (100% zero-command-line Hostinger automated sync)
     const {
       syncMatchesCore,
+      autoExpireStaleLiveAndUpcomingMatchesCore,
       startDaily12AMScheduler,
       start10MinSyncScheduler,
       startLiveScoreBackgroundScheduler,
@@ -27,8 +28,14 @@ const startServer = async () => {
     const { syncAllSubcategoryBadgesCore } = require('./controllers/subcategoriesController');
     const { startHourlyChinaOpenSyncScheduler, syncChinaOpenMatchesCore } = require('./services/chinaOpenSyncService');
 
-    console.log('🔄 [BOOT] Running automatic database migration and match sync on server boot...');
-    syncMatchesCore()
+    console.log('🔄 [BOOT] Running automatic database migration, match sync & auto-expiry on server boot...');
+    autoExpireStaleLiveAndUpcomingMatchesCore()
+      .then((expireRes) => {
+        if (expireRes?.expiredLive > 0 || expireRes?.expiredUpcoming > 0 || expireRes?.cleanedObsolete > 0) {
+          console.log(`🧹 [BOOT] Auto-expired stale matches: ${expireRes.expiredLive} live finished, ${expireRes.expiredUpcoming} upcoming expired, ${expireRes.cleanedObsolete} obsolete removed.`);
+        }
+        return syncMatchesCore();
+      })
       .then((res) => {
         console.log('✅ [BOOT] Match sync on server boot completed successfully:', res);
         // Sync China Open tennis matches (daily & real-time live scores)

@@ -1491,9 +1491,77 @@ const reorderMatches = async (req, res, next) => {
 
 let isSyncingCore = false;
 
+// Auto-expire stale live matches (started > 6 hours ago or no updates in > 6 hours)
+// and stale upcoming matches (scheduled > 24 hours ago) that are not customized by admin
+const autoExpireStaleLiveAndUpcomingMatchesCore = async () => {
+  try {
+    await ensureTableExistsOnce();
+    const connection = await pool.getConnection();
+    try {
+      // 1. Auto-expire LIVE matches older than 6 hours
+      // Any automated match that started 6+ hours ago or has received no updates for 6+ hours
+      const [liveResult] = await connection.query(`
+        UPDATE \`matches\`
+        SET \`status\` = 'finished',
+            \`live_minute\` = COALESCE(NULLIF(\`live_minute\`, ''), 'FT')
+        WHERE \`status\` = 'live'
+          AND (
+            (\`is_customized\` = 0 AND (
+              \`match_time\` <= DATE_SUB(NOW(), INTERVAL 6 HOUR)
+              OR \`updated_at\` <= DATE_SUB(NOW(), INTERVAL 6 HOUR)
+            ))
+            OR (\`is_customized\` = 1 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 24 HOUR))
+          );
+      `);
+      const expiredLiveCount = liveResult?.affectedRows || 0;
+
+      // 2. Auto-expire UPCOMING matches whose scheduled start time was in the past
+      // Automated matches: > 24 hours ago; Customized matches: > 48 hours ago
+      const [upcomingResult] = await connection.query(`
+        UPDATE \`matches\`
+        SET \`status\` = 'finished'
+        WHERE \`status\` = 'upcoming'
+          AND (
+            (\`is_customized\` = 0 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 24 HOUR))
+            OR (\`is_customized\` = 1 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 48 HOUR))
+          );
+      `);
+      const expiredUpcomingCount = upcomingResult?.affectedRows || 0;
+
+      // 3. Clean up obsolete finished matches (> 48 hours ago) that are strictly NOT customized
+      const [cleanResult] = await connection.query(`
+        DELETE FROM \`matches\`
+        WHERE \`status\` = 'finished'
+          AND \`is_customized\` = 0
+          AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 48 HOUR);
+      `);
+      const cleanedObsoleteCount = cleanResult?.affectedRows || 0;
+
+      if (expiredLiveCount > 0 || expiredUpcomingCount > 0 || cleanedObsoleteCount > 0) {
+        console.log(`⏱️ [AUTO-EXPIRE] Successfully auto-expired ${expiredLiveCount} stale live matches, ${expiredUpcomingCount} past upcoming matches, cleaned ${cleanedObsoleteCount} obsolete matches (>48h).`);
+        clearMatchesCache();
+      }
+
+      return {
+        expiredLive: expiredLiveCount,
+        expiredUpcoming: expiredUpcomingCount,
+        cleanedObsolete: cleanedObsoleteCount,
+      };
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    console.error('❌ [AUTO-EXPIRE] Error in autoExpireStaleLiveAndUpcomingMatchesCore:', err.message);
+    return { expiredLive: 0, expiredUpcoming: 0, cleanedObsolete: 0 };
+  }
+};
+
 // Midnight 12:00 AM Automated Cleanup Function (with 11:00 PM cutoff rule)
 const cleanupMidnightMatchesCore = async (midnightTime = new Date()) => {
   try {
+    // 1. Auto-expire any stale live (>6h) or upcoming (>24h) matches first
+    await autoExpireStaleLiveAndUpcomingMatchesCore();
+
     // 11:00 PM cutoff: exactly 1 hour prior to 12:00 AM midnight
     const cutoff11PM = new Date(midnightTime.getTime() - 60 * 60 * 1000);
 
@@ -1539,6 +1607,8 @@ const syncMatchesCore = async () => {
 
   try {
     await ensureTableExists();
+    // Auto-expire stale matches before syncing
+    await autoExpireStaleLiveAndUpcomingMatchesCore();
 
     const now = new Date();
     const today = now.toISOString().split('T')[0];
@@ -1904,10 +1974,25 @@ const syncMatchesCore = async () => {
 // Express Route Controller: Triggered by Admin "Sync Matches (Today & Tomorrow)" button
 const syncMatches = async (req, res, next) => {
   try {
+    await autoExpireStaleLiveAndUpcomingMatchesCore();
     const result = await syncMatchesCore();
     return res.status(200).json({
       success: true,
       message: `Matches sync completed for Today & Tomorrow! Deleted ${result.deleted} past matches, added ${result.added} new matches, ${result.preserved} matches preserved.`,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Express Route Controller: Manually trigger auto-expire via Admin Panel or API
+const autoExpireMatches = async (req, res, next) => {
+  try {
+    const result = await autoExpireStaleLiveAndUpcomingMatchesCore();
+    return res.status(200).json({
+      success: true,
+      message: `Auto-expire completed: ${result.expiredLive} live matches finished, ${result.expiredUpcoming} upcoming matches expired, ${result.cleanedObsolete} obsolete matches removed.`,
       data: result,
     });
   } catch (error) {
@@ -1974,6 +2059,7 @@ const start10MinSyncScheduler = () => {
   setInterval(async () => {
     try {
       console.log('🔄 [10-MIN SYNC] Periodic check for new & updated matches from TheSportsDB...');
+      await autoExpireStaleLiveAndUpcomingMatchesCore();
       const result = await syncMatchesCore();
       if (!result?.skipped) {
         console.log(`✅ [10-MIN SYNC] Sync done: ${result?.added || 0} new added, ${result?.preserved || 0} updated/preserved.`);
@@ -2089,11 +2175,17 @@ const repairMatchesMissingSubcategoryCore = async () => {
 };
 
 // Dedicated background live score sync scheduler (every 30 seconds)
+let liveScoreCycleCount = 0;
 const startLiveScoreBackgroundScheduler = () => {
   console.log('⚡ [LIVE SCORE SCHEDULER] Background live score auto-sync initialized (running every 30 seconds).');
   setInterval(async () => {
     try {
       await syncLiveScoresWithSportsDB();
+      liveScoreCycleCount++;
+      // Check and auto-expire stale live matches every 10 cycles (~5 minutes)
+      if (liveScoreCycleCount % 10 === 0) {
+        await autoExpireStaleLiveAndUpcomingMatchesCore();
+      }
     } catch (err) {
       // background error ignore
     }
@@ -2112,6 +2204,8 @@ module.exports = {
   reorderMatches,
   syncMatches,
   syncMatchesCore,
+  autoExpireMatches,
+  autoExpireStaleLiveAndUpcomingMatchesCore,
   cleanupMidnightMatchesCore,
   repairMatchesMissingSubcategoryCore,
   startDaily12AMScheduler,

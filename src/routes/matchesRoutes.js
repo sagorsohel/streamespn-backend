@@ -11,6 +11,7 @@ const {
   reorderMatches,
   syncMatches,
   syncChinaOpenMatches,
+  autoExpireMatches,
 } = require('../controllers/matchesController');
 const { verifyToken } = require('../middleware/auth');
 
@@ -19,6 +20,8 @@ const router = express.Router();
 router.get('/', getMatches);
 router.get('/banner', getBannerMatches);
 router.get('/live-scores', getLiveScores);
+router.post('/auto-expire', verifyToken, autoExpireMatches);
+router.get('/auto-expire', autoExpireMatches); // allow automated cron/webhook triggers
 router.post('/sync-china-open', verifyToken, syncChinaOpenMatches);
 router.get('/sync-china-open', syncChinaOpenMatches); // allow automated cron/webhook triggers
 router.get('/:id', getMatchById);
