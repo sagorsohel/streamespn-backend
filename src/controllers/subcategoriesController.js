@@ -71,20 +71,52 @@ const ensureTableExists = async () => {
   } catch (err) {}
 
   try {
-    // Ensure the 7 core trending subcategories are ALWAYS ON, trending, show on home, and properly ordered
+    // 1. Reset accidental auto-trending on minor leagues (e.g. from old syncs) so they don't pollute Trending
+    await connection.query(`
+      UPDATE \`sports_subcategories\`
+      SET \`is_trending\` = 0
+      WHERE \`is_customized\` = 0
+        AND \`name\` NOT IN (
+          'English Premier League', 'Premier League',
+          'Spanish La Liga', 'Spanish LaLiga', 'La Liga', 'LaLiga',
+          'French Ligue 1', 'Ligue 1',
+          'German Bundesliga', 'Bundesliga',
+          'Boxing',
+          'NFL',
+          'NCAA', 'NCAA Division 1 Football'
+        )
+        AND \`id\` NOT IN (1, 3, 126, 5, 524, 7, 12);
+    `);
+
+    // 2. Ensure the 7 core trending subcategories are ALWAYS ON, trending, show on home, and properly ordered (matched by exact NAME and ID)
     await connection.query(`
       UPDATE \`sports_subcategories\`
       SET \`is_trending\` = 1, \`status\` = 1, \`show_on_home\` = 1, \`display_order\` = CASE 
-        WHEN \`id\` = 1 OR \`name\` = 'English Premier League' THEN 1
-        WHEN \`id\` = 3 OR \`name\` IN ('Spanish La Liga', 'Spanish LaLiga') THEN 2
-        WHEN \`id\` = 126 OR \`name\` = 'French Ligue 1' THEN 3
-        WHEN \`id\` = 5 OR \`name\` = 'German Bundesliga' THEN 4
-        WHEN \`id\` = 524 OR \`name\` = 'Boxing' THEN 5
-        WHEN \`id\` = 7 OR \`name\` = 'NFL' THEN 6
-        WHEN \`id\` = 12 OR \`name\` IN ('NCAA', 'NCAA Division 1 Football') THEN 7
+        WHEN \`name\` IN ('English Premier League', 'Premier League') OR \`id\` = 1 THEN 1
+        WHEN \`name\` IN ('Spanish La Liga', 'Spanish LaLiga', 'La Liga', 'LaLiga') OR \`id\` = 3 THEN 2
+        WHEN \`name\` IN ('French Ligue 1', 'Ligue 1') OR \`id\` = 126 THEN 3
+        WHEN \`name\` IN ('German Bundesliga', 'Bundesliga') OR \`id\` = 5 THEN 4
+        WHEN \`name\` = 'Boxing' OR \`id\` = 524 THEN 5
+        WHEN \`name\` = 'NFL' OR \`id\` = 7 THEN 6
+        WHEN \`name\` IN ('NCAA', 'NCAA Division 1 Football') OR \`id\` = 12 THEN 7
         ELSE \`display_order\`
       END
-      WHERE \`id\` IN (1, 3, 126, 5, 524, 7, 12);
+      WHERE \`name\` IN (
+        'English Premier League', 'Premier League',
+        'Spanish La Liga', 'Spanish LaLiga', 'La Liga', 'LaLiga',
+        'French Ligue 1', 'Ligue 1',
+        'German Bundesliga', 'Bundesliga',
+        'Boxing',
+        'NFL',
+        'NCAA', 'NCAA Division 1 Football'
+      ) OR \`id\` IN (1, 3, 126, 5, 524, 7, 12);
+    `);
+
+    // If duplicate NCAA exists, keep only the primary one trending
+    await connection.query(`
+      UPDATE \`sports_subcategories\`
+      SET \`is_trending\` = 0
+      WHERE \`name\` = 'NCAA Division 1 Football' AND \`id\` != 12;
     `);
   } catch (err) {}
 
@@ -207,26 +239,35 @@ const getSubcategories = async (req, res, next) => {
     }
 
     if (trending === 'true' || trending === '1') {
-      const coreIds = [1, 3, 126, 5, 524, 7, 12];
-      
+      const isCoreLeagueExpr = sql`(
+        ${sportsSubcategories.name} IN ('English Premier League', 'Premier League') OR
+        ${sportsSubcategories.name} IN ('Spanish La Liga', 'Spanish LaLiga', 'La Liga', 'LaLiga') OR
+        ${sportsSubcategories.name} IN ('French Ligue 1', 'Ligue 1') OR
+        ${sportsSubcategories.name} IN ('German Bundesliga', 'Bundesliga') OR
+        ${sportsSubcategories.name} = 'Boxing' OR
+        ${sportsSubcategories.name} = 'NFL' OR
+        (${sportsSubcategories.name} IN ('NCAA', 'NCAA Division 1 Football') AND ${sportsSubcategories.id} = 12) OR
+        ${sportsSubcategories.id} IN (1, 3, 126, 5, 524, 7, 12)
+      )`;
+
       // Trending subcategories:
-      // Either manually marked as trending (is_trending = 1) OR one of the permanent core trending leagues
+      // Either manually marked as trending (is_trending = 1) OR one of the permanent core trending leagues (matched by exact name or ID)
       query = query.having(
         or(
           eq(sportsSubcategories.isTrending, true),
-          inArray(sportsSubcategories.id, coreIds)
+          isCoreLeagueExpr
         )
       );
 
-      // Custom priority order: the 7 core leagues strictly first in requested order, followed by other admin-enabled trending subcategories
+      // Custom priority order: the 7 core leagues strictly first in requested order (1 to 7), followed by other admin-enabled trending subcategories (999)
       const coreRankExpr = sql`CASE 
-        WHEN ${sportsSubcategories.id} = 1 OR ${sportsSubcategories.name} = 'English Premier League' THEN 1
-        WHEN ${sportsSubcategories.id} = 3 OR ${sportsSubcategories.name} IN ('Spanish La Liga', 'Spanish LaLiga') THEN 2
-        WHEN ${sportsSubcategories.id} = 126 OR ${sportsSubcategories.name} = 'French Ligue 1' THEN 3
-        WHEN ${sportsSubcategories.id} = 5 OR ${sportsSubcategories.name} = 'German Bundesliga' THEN 4
-        WHEN ${sportsSubcategories.id} = 524 OR ${sportsSubcategories.name} = 'Boxing' THEN 5
-        WHEN ${sportsSubcategories.id} = 7 OR ${sportsSubcategories.name} = 'NFL' THEN 6
-        WHEN ${sportsSubcategories.id} = 12 OR ${sportsSubcategories.name} IN ('NCAA', 'NCAA Division 1 Football') THEN 7
+        WHEN ${sportsSubcategories.name} IN ('English Premier League', 'Premier League') OR ${sportsSubcategories.id} = 1 THEN 1
+        WHEN ${sportsSubcategories.name} IN ('Spanish La Liga', 'Spanish LaLiga', 'La Liga', 'LaLiga') OR ${sportsSubcategories.id} = 3 THEN 2
+        WHEN ${sportsSubcategories.name} IN ('French Ligue 1', 'Ligue 1') OR ${sportsSubcategories.id} = 126 THEN 3
+        WHEN ${sportsSubcategories.name} IN ('German Bundesliga', 'Bundesliga') OR ${sportsSubcategories.id} = 5 THEN 4
+        WHEN ${sportsSubcategories.name} = 'Boxing' OR ${sportsSubcategories.id} = 524 THEN 5
+        WHEN ${sportsSubcategories.name} = 'NFL' OR ${sportsSubcategories.id} = 7 THEN 6
+        WHEN (${sportsSubcategories.name} IN ('NCAA', 'NCAA Division 1 Football') AND ${sportsSubcategories.id} = 12) OR ${sportsSubcategories.id} = 12 THEN 7
         ELSE 999 END`;
 
       // Order by:
