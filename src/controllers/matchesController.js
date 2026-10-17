@@ -147,6 +147,13 @@ const ensureTableExists = async () => {
     await connection.query(`CREATE INDEX \`idx_subcat_cat_status\` ON \`sports_subcategories\` (\`category_id\`, \`status\`);`);
   } catch (e) {}
 
+  // Auto-clean any legacy literal 'null' or 'undefined' string values stored as scores
+  try {
+    await connection.query("UPDATE `matches` SET `home_score` = NULL WHERE `home_score` = 'null' OR `home_score` = 'undefined';");
+    await connection.query("UPDATE `matches` SET `away_score` = NULL WHERE `away_score` = 'null' OR `away_score` = 'undefined';");
+    await connection.query("UPDATE `matches` SET `home_score` = NULL, `away_score` = NULL WHERE `status` = 'upcoming';");
+  } catch (e) {}
+
   connection.release();
 };
 
@@ -372,7 +379,12 @@ const getMatches = async (req, res, next) => {
       query = query.limit(limitNum).offset(offset);
     }
 
-    const results = await query;
+    const rawResults = await query;
+    const results = rawResults.map((m) => ({
+      ...m,
+      homeScore: m.homeScore === 'null' || m.homeScore === 'undefined' ? null : m.homeScore,
+      awayScore: m.awayScore === 'null' || m.awayScore === 'undefined' ? null : m.awayScore,
+    }));
 
     if (isPublicPage1) {
       matchesCacheMap.set(cacheKey, { timestamp: Date.now(), data: results });
@@ -402,6 +414,13 @@ const getBannerMatches = async (req, res, next) => {
     await ensureTableExistsOnce();
 
     const sendBanner = (payload) => {
+      if (payload && payload.data && Array.isArray(payload.data.matches)) {
+        payload.data.matches = payload.data.matches.map((m) => ({
+          ...m,
+          homeScore: (m.homeScore === null || m.homeScore === undefined || m.homeScore === 'null' || m.homeScore === 'undefined' || m.status === 'upcoming') ? null : m.homeScore,
+          awayScore: (m.awayScore === null || m.awayScore === undefined || m.awayScore === 'null' || m.awayScore === 'undefined' || m.status === 'upcoming') ? null : m.awayScore,
+        }));
+      }
       cachedBannerMatches = payload;
       lastBannerFetchTime = Date.now();
       res.setHeader('Cache-Control', 'public, max-age=20, s-maxage=20, stale-while-revalidate=30');
@@ -948,10 +967,16 @@ const getLiveScores = async (req, res, next) => {
       .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id))
       .where(and(...conditions));
 
+    const sanitizedLiveMatches = liveMatches.map((m) => ({
+      ...m,
+      homeScore: (m.homeScore === null || m.homeScore === undefined || m.homeScore === 'null' || m.homeScore === 'undefined' || m.status === 'upcoming') ? null : m.homeScore,
+      awayScore: (m.awayScore === null || m.awayScore === undefined || m.awayScore === 'null' || m.awayScore === 'undefined' || m.status === 'upcoming') ? null : m.awayScore,
+    }));
+
     res.setHeader('Cache-Control', 'public, max-age=5, s-maxage=5, stale-while-revalidate=10');
     return res.status(200).json({
       success: true,
-      data: liveMatches,
+      data: sanitizedLiveMatches,
     });
   } catch (error) {
     next(error);
@@ -1245,6 +1270,11 @@ const getMatchById = async (req, res, next) => {
       }
     }
 
+    if (matchObj) {
+      if (matchObj.homeScore === 'null' || matchObj.homeScore === 'undefined' || matchObj.status === 'upcoming') matchObj.homeScore = null;
+      if (matchObj.awayScore === 'null' || matchObj.awayScore === 'undefined' || matchObj.status === 'upcoming') matchObj.awayScore = null;
+    }
+
     return res.status(200).json({
       success: true,
       data: {
@@ -1308,8 +1338,8 @@ const createMatch = async (req, res, next) => {
       homeTeamLogo: homeTeamLogo || null,
       awayTeam: awayTeam ? awayTeam.trim() : null,
       awayTeamLogo: awayTeamLogo || null,
-      homeScore: homeScore !== undefined ? String(homeScore) : null,
-      awayScore: awayScore !== undefined ? String(awayScore) : null,
+      homeScore: (homeScore !== undefined && homeScore !== null && homeScore !== 'null') ? String(homeScore) : null,
+      awayScore: (awayScore !== undefined && awayScore !== null && awayScore !== 'null') ? String(awayScore) : null,
       livePeriod: req.body.livePeriod !== undefined ? (req.body.livePeriod ? String(req.body.livePeriod) : null) : null,
       liveMinute: req.body.liveMinute !== undefined ? (req.body.liveMinute ? String(req.body.liveMinute) : null) : null,
       matchTime: matchTime ? new Date(matchTime) : new Date(),
@@ -1333,8 +1363,8 @@ const createMatch = async (req, res, next) => {
       homeTeamLogo: homeTeamLogo || null,
       awayTeam: awayTeam || null,
       awayTeamLogo: awayTeamLogo || null,
-      homeScore: homeScore !== undefined ? String(homeScore) : null,
-      awayScore: awayScore !== undefined ? String(awayScore) : null,
+      homeScore: (homeScore !== undefined && homeScore !== null && homeScore !== 'null') ? String(homeScore) : null,
+      awayScore: (awayScore !== undefined && awayScore !== null && awayScore !== 'null') ? String(awayScore) : null,
       matchTime: matchTime || new Date().toISOString(),
       status: status || 'upcoming',
       venue: venue || null,
@@ -1422,8 +1452,8 @@ const updateMatch = async (req, res, next) => {
         homeTeamLogo: homeTeamLogo !== undefined ? homeTeamLogo : existing[0].homeTeamLogo,
         awayTeam: awayTeam !== undefined ? awayTeam : existing[0].awayTeam,
         awayTeamLogo: awayTeamLogo !== undefined ? awayTeamLogo : existing[0].awayTeamLogo,
-        homeScore: homeScore !== undefined ? (homeScore !== null ? String(homeScore) : null) : existing[0].homeScore,
-        awayScore: awayScore !== undefined ? (awayScore !== null ? String(awayScore) : null) : existing[0].awayScore,
+        homeScore: homeScore !== undefined ? ((homeScore !== null && homeScore !== 'null') ? String(homeScore) : null) : existing[0].homeScore,
+        awayScore: awayScore !== undefined ? ((awayScore !== null && awayScore !== 'null') ? String(awayScore) : null) : existing[0].awayScore,
         livePeriod: req.body.livePeriod !== undefined ? (req.body.livePeriod ? String(req.body.livePeriod) : null) : existing[0].livePeriod,
         liveMinute: req.body.liveMinute !== undefined ? (req.body.liveMinute ? String(req.body.liveMinute) : null) : existing[0].liveMinute,
         matchTime: matchTime !== undefined ? (matchTime ? new Date(matchTime) : null) : existing[0].matchTime,
