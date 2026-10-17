@@ -345,13 +345,13 @@ async function main() {
     if (localSub.length === 0) {
       await pool.query(
         `INSERT INTO sports_subcategories (id, category_id, name, logo_url, status, is_trending, is_home_banner, show_on_home, is_customized)
-         VALUES (?, ?, 'China Open', 'https://r2.thesportsdb.com/images/media/league/badge/x16ihc1546113079.png', 1, 1, 1, 1, 1)
-         ON DUPLICATE KEY UPDATE status = 1, show_on_home = 1, is_trending = 1, is_home_banner = 1`,
+         VALUES (?, ?, 'China Open', 'https://r2.thesportsdb.com/images/media/league/badge/x16ihc1546113079.png', 1, 0, 1, 1, 1)
+         ON DUPLICATE KEY UPDATE status = 1, show_on_home = 1, is_home_banner = 1`,
         [LOCAL_SUBCATEGORY_ID, LOCAL_CATEGORY_ID]
       );
     } else {
       await pool.query(
-        `UPDATE sports_subcategories SET status = 1, show_on_home = 1, is_trending = 1, is_home_banner = 1 WHERE id = ?`,
+        `UPDATE sports_subcategories SET status = 1, show_on_home = 1, is_home_banner = 1 WHERE id = ?`,
         [LOCAL_SUBCATEGORY_ID]
       );
     }

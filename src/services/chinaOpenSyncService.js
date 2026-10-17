@@ -317,7 +317,7 @@ const syncChinaOpenMatchesCore = async () => {
     // 5. Update Local Database
     try {
       await pool.query(
-        `UPDATE sports_subcategories SET status = 1, show_on_home = 1, is_trending = 1 WHERE id = ?`,
+        `UPDATE sports_subcategories SET status = 1, show_on_home = 1 WHERE id = ?`,
         [LOCAL_SUBCATEGORY_ID]
       );
 

@@ -652,6 +652,19 @@ const resolveOrCreateSubcategory = async (catId, leagueName, idLeague, subcatego
     }
   }
 
+  // Alias fallbacks for core leagues
+  if (!matchedSubcat) {
+    if (catId === 3 && (lowerLeague === 'ncaa division 1 football' || lowerLeague === 'ncaa football' || lowerLeague === 'ncaa')) {
+      matchedSubcat = subcategoryMap.get('3:ncaa') || subcategoryMap.get('3:ncaa division 1 football') || subcategoryMap.get('ncaa');
+    } else if (catId === 1 && (lowerLeague === 'spanish laliga' || lowerLeague === 'la liga' || lowerLeague === 'spanish la liga')) {
+      matchedSubcat = subcategoryMap.get('1:spanish la liga') || subcategoryMap.get('1:spanish laliga');
+    } else if (catId === 1 && (lowerLeague === 'french ligue 1' || lowerLeague === 'ligue 1')) {
+      matchedSubcat = subcategoryMap.get('1:french ligue 1');
+    } else if (catId === 1 && (lowerLeague === 'german bundesliga' || lowerLeague === 'bundesliga')) {
+      matchedSubcat = subcategoryMap.get('1:german bundesliga');
+    }
+  }
+
   if (matchedSubcat) {
     // 🛑 If disabled (status = false/0) by admin, respect setting and NEVER auto-activate!
     if (!matchedSubcat.status) {

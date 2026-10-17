@@ -70,6 +70,24 @@ const ensureTableExists = async () => {
     await connection.query(`CREATE INDEX \`idx_subcat_cat_status\` ON \`sports_subcategories\` (\`category_id\`, \`status\`);`);
   } catch (err) {}
 
+  try {
+    // Ensure the 7 core trending subcategories are ALWAYS ON, trending, show on home, and properly ordered
+    await connection.query(`
+      UPDATE \`sports_subcategories\`
+      SET \`is_trending\` = 1, \`status\` = 1, \`show_on_home\` = 1, \`display_order\` = CASE 
+        WHEN \`id\` = 1 OR \`name\` = 'English Premier League' THEN 1
+        WHEN \`id\` = 3 OR \`name\` IN ('Spanish La Liga', 'Spanish LaLiga') THEN 2
+        WHEN \`id\` = 126 OR \`name\` = 'French Ligue 1' THEN 3
+        WHEN \`id\` = 5 OR \`name\` = 'German Bundesliga' THEN 4
+        WHEN \`id\` = 524 OR \`name\` = 'Boxing' THEN 5
+        WHEN \`id\` = 7 OR \`name\` = 'NFL' THEN 6
+        WHEN \`id\` = 12 OR \`name\` IN ('NCAA', 'NCAA Division 1 Football') THEN 7
+        ELSE \`display_order\`
+      END
+      WHERE \`id\` IN (1, 3, 126, 5, 524, 7, 12);
+    `);
+  } catch (err) {}
+
   connection.release();
   isSubcatTableEnsured = true;
 };
@@ -189,22 +207,38 @@ const getSubcategories = async (req, res, next) => {
     }
 
     if (trending === 'true' || trending === '1') {
-      const minMatches = req.query.minMatches !== undefined ? Number(req.query.minMatches) : 10;
-      // Trending/Featured subcategories:
-      // Either manually marked as trending (is_trending = 1) OR automatically trending by having >= 10 active matches
+      const coreIds = [1, 3, 126, 5, 524, 7, 12];
+      
+      // Trending subcategories:
+      // Either manually marked as trending (is_trending = 1) OR one of the permanent core trending leagues
       query = query.having(
         or(
           eq(sportsSubcategories.isTrending, true),
-          sql`COUNT(CASE WHEN ${matches.id} IS NOT NULL AND (${matches.status} = 'live' OR (${matches.status} != 'finished' AND ${matches.matchTime} >= ${queryRangeStart} AND ${matches.matchTime} <= ${queryRangeEnd})) THEN 1 ELSE NULL END) >= ${minMatches}`
+          inArray(sportsSubcategories.id, coreIds)
         )
       );
 
-      // Order by: Manually pinned (isTrending DESC), then highest active matches (matchCount DESC), live matches, displayOrder, name
+      // Custom priority order: the 7 core leagues strictly first in requested order, followed by other admin-enabled trending subcategories
+      const coreRankExpr = sql`CASE 
+        WHEN ${sportsSubcategories.id} = 1 OR ${sportsSubcategories.name} = 'English Premier League' THEN 1
+        WHEN ${sportsSubcategories.id} = 3 OR ${sportsSubcategories.name} IN ('Spanish La Liga', 'Spanish LaLiga') THEN 2
+        WHEN ${sportsSubcategories.id} = 126 OR ${sportsSubcategories.name} = 'French Ligue 1' THEN 3
+        WHEN ${sportsSubcategories.id} = 5 OR ${sportsSubcategories.name} = 'German Bundesliga' THEN 4
+        WHEN ${sportsSubcategories.id} = 524 OR ${sportsSubcategories.name} = 'Boxing' THEN 5
+        WHEN ${sportsSubcategories.id} = 7 OR ${sportsSubcategories.name} = 'NFL' THEN 6
+        WHEN ${sportsSubcategories.id} = 12 OR ${sportsSubcategories.name} IN ('NCAA', 'NCAA Division 1 Football') THEN 7
+        ELSE 999 END`;
+
+      // Order by:
+      // 1. Core leagues priority (1 to 7)
+      // 2. Admin-enabled trending leagues (isTrending DESC)
+      // 3. displayOrder ASC, matchCount DESC, liveMatchCount DESC, name ASC
       query = query.orderBy(
+        asc(coreRankExpr),
         desc(sportsSubcategories.isTrending),
+        asc(sportsSubcategories.displayOrder),
         desc(matchCountExpr),
         desc(liveMatchCountExpr),
-        asc(sportsSubcategories.displayOrder),
         asc(sportsSubcategories.name)
       );
     } else {
