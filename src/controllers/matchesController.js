@@ -1668,22 +1668,59 @@ const syncMatchesCore = async () => {
 
   // 📡 2. Sync Today and Tomorrow ONLY (2 Days)
   const datesToSync = [today, tomorrow];
-  let rawEvents = [];
+  const eventMap = new Map();
 
-  const apiResponses = await Promise.all(
-    datesToSync.map((dateStr) =>
+  // Target sports queried individually so TheSportsDB's 1,500 event cap is never hit on busy weekend days
+  const targetSportsToQuery = [
+    'Soccer',
+    'Basketball',
+    'American Football',
+    'Ice Hockey',
+    'Baseball',
+    'Rugby',
+    'Fighting',
+    'Motorsport',
+    'Volleyball',
+    'Golf',
+    'Cricket',
+    'Cycling',
+    'Table Tennis',
+    'Tennis',
+  ];
+
+  const fetchPromises = [];
+  for (const dateStr of datesToSync) {
+    // 1. Query each sport directly (bypasses 1,500 event truncation limit)
+    for (const sport of targetSportsToQuery) {
+      fetchPromises.push(
+        axios
+          .get(`https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/eventsday.php?d=${dateStr}&s=${encodeURIComponent(sport)}`, {
+            timeout: 10000,
+          })
+          .then((res) => (res.data && res.data.events ? res.data.events : []))
+          .catch(() => [])
+      );
+    }
+
+    // 2. Supplemental global query for any other sports
+    fetchPromises.push(
       axios
         .get(`https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/eventsday.php?d=${dateStr}`, {
           timeout: 10000,
         })
         .then((res) => (res.data && res.data.events ? res.data.events : []))
         .catch(() => [])
-    )
-  );
+    );
+  }
 
-  apiResponses.forEach((events) => {
-    rawEvents.push(...events);
+  const apiResponses = await Promise.all(fetchPromises);
+  apiResponses.flat().forEach((ev) => {
+    if (ev && ev.idEvent && !eventMap.has(ev.idEvent)) {
+      eventMap.set(ev.idEvent, ev);
+    }
   });
+
+  const rawEvents = Array.from(eventMap.values());
 
   if (rawEvents.length === 0) {
     return { added: 0, preserved: 0, deleted: deletedCount, totalFetched: 0 };
