@@ -799,6 +799,20 @@ const syncLiveScoresWithSportsDB = async () => {
       ) {
         targetStatus = 'finished';
       } else if (
+        statusStr === 'canc' ||
+        statusStr === 'cancelled' ||
+        statusStr.includes('canc') ||
+        statusStr === 'post' ||
+        statusStr === 'postponed' ||
+        statusStr.includes('post') ||
+        statusStr === 'ab' ||
+        statusStr === 'abandoned' ||
+        statusStr === 'susp' ||
+        statusStr.includes('delay')
+      ) {
+        // Cancelled, Postponed, or Suspended matches should NEVER be marked live
+        targetStatus = 'finished';
+      } else if (
         statusStr.includes('1h') ||
         statusStr.includes('2h') ||
         statusStr.includes('ht') ||
@@ -823,11 +837,24 @@ const syncLiveScoresWithSportsDB = async () => {
         progressStr.includes('q3') ||
         progressStr.includes('q4')
       ) {
-        targetStatus = 'live';
+        // Validation: if match started > 4 hours ago, it is already finished (SportsDB stale cache guard)
+        const itemTs = item.strTimestamp ? new Date(item.strTimestamp.endsWith('Z') || item.strTimestamp.includes('+') ? item.strTimestamp : `${item.strTimestamp}Z`) : null;
+        if (itemTs && itemTs.getTime() < Date.now() - 4 * 3600 * 1000) {
+          targetStatus = 'finished';
+        } else {
+          targetStatus = 'live';
+        }
       } else if (statusStr === 'ns' || statusStr === 'not started' || statusStr.includes('sched')) {
         targetStatus = 'upcoming';
       } else if (item.intHomeScore !== null || item.intAwayScore !== null) {
-        targetStatus = 'live';
+        const itemTs = item.strTimestamp ? new Date(item.strTimestamp.endsWith('Z') || item.strTimestamp.includes('+') ? item.strTimestamp : `${item.strTimestamp}Z`) : null;
+        if (itemTs && itemTs.getTime() < Date.now() - 4 * 3600 * 1000) {
+          targetStatus = 'finished';
+        } else if (itemTs && itemTs.getTime() > Date.now() + 30 * 60 * 1000) {
+          targetStatus = 'upcoming';
+        } else {
+          targetStatus = 'live';
+        }
       }
 
       const homeScoreVal = item.intHomeScore !== null && item.intHomeScore !== undefined ? String(item.intHomeScore) : null;
@@ -1583,6 +1610,7 @@ const autoExpireStaleLiveAndUpcomingMatchesCore = async () => {
           AND (
             \`live_minute\` = 'FT'
             OR \`live_period\` = 'FT'
+            OR \`live_period\` IN ('POST', 'CANC', 'PST', 'CAN', 'AB', 'SUSP')
             OR \`live_minute\` LIKE '%FT%'
             OR \`live_period\` LIKE '%FT%'
             OR (\`is_customized\` = 0 AND (
