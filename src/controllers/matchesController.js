@@ -756,7 +756,7 @@ const syncLiveScoresWithSportsDB = async () => {
   lastLiveSyncTime = now;
 
   try {
-    const res = await fetch('https://www.thesportsdb.com/api/v1/json/3/livescore.php');
+    const res = await fetch(`https://www.thesportsdb.com/api/v1/json/${SPORTSDB_API_KEY}/livescore.php`);
     const data = await res.json();
     if (!data.livescore || !Array.isArray(data.livescore)) return;
 
@@ -1571,32 +1571,38 @@ const autoExpireStaleLiveAndUpcomingMatchesCore = async () => {
     await ensureTableExistsOnce();
     const connection = await pool.getConnection();
     try {
-      // 1. Auto-expire LIVE matches older than 6 hours
-      // Any automated match that started 6+ hours ago or has received no updates for 6+ hours
+      // 1. Auto-expire LIVE matches:
+      // Any match whose live minute or period is FT / Finished,
+      // or any match that started 3+ hours ago (standard sports take ~2 hours),
+      // or has received no updates for 3+ hours
       const [liveResult] = await connection.query(`
         UPDATE \`matches\`
         SET \`status\` = 'finished',
             \`live_minute\` = COALESCE(NULLIF(\`live_minute\`, ''), 'FT')
         WHERE \`status\` = 'live'
           AND (
-            (\`is_customized\` = 0 AND (
-              \`match_time\` <= DATE_SUB(NOW(), INTERVAL 6 HOUR)
-              OR \`updated_at\` <= DATE_SUB(NOW(), INTERVAL 6 HOUR)
+            \`live_minute\` = 'FT'
+            OR \`live_period\` = 'FT'
+            OR \`live_minute\` LIKE '%FT%'
+            OR \`live_period\` LIKE '%FT%'
+            OR (\`is_customized\` = 0 AND (
+              \`match_time\` <= DATE_SUB(NOW(), INTERVAL 3 HOUR)
+              OR \`updated_at\` <= DATE_SUB(NOW(), INTERVAL 3 HOUR)
             ))
-            OR (\`is_customized\` = 1 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 24 HOUR))
+            OR (\`is_customized\` = 1 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 12 HOUR))
           );
       `);
       const expiredLiveCount = liveResult?.affectedRows || 0;
 
       // 2. Auto-expire UPCOMING matches whose scheduled start time was in the past
-      // Automated matches: > 24 hours ago; Customized matches: > 48 hours ago
+      // Automated matches: > 12 hours ago; Customized matches: > 24 hours ago
       const [upcomingResult] = await connection.query(`
         UPDATE \`matches\`
         SET \`status\` = 'finished'
         WHERE \`status\` = 'upcoming'
           AND (
-            (\`is_customized\` = 0 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 24 HOUR))
-            OR (\`is_customized\` = 1 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 48 HOUR))
+            (\`is_customized\` = 0 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 12 HOUR))
+            OR (\`is_customized\` = 1 AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 24 HOUR))
           );
       `);
       const expiredUpcomingCount = upcomingResult?.affectedRows || 0;
@@ -1946,10 +1952,15 @@ const syncMatchesCore = async () => {
       statusStr.includes('q3') ||
       statusStr.includes('q4')
     ) {
-      status = 'live';
+      // If match started more than 2.5 hours ago, eventsday.php CDN cache is stale; the match is finished
+      if (matchTimeVal < new Date(now.getTime() - 2.5 * 3600 * 1000)) {
+        status = 'finished';
+      } else {
+        status = 'live';
+      }
     } else if (matchTimeVal > now) {
       status = 'upcoming';
-    } else if (matchTimeVal < new Date(now.getTime() - 4 * 3600 * 1000) && ev.intHomeScore !== null) {
+    } else if (matchTimeVal < new Date(now.getTime() - 2.5 * 3600 * 1000)) {
       status = 'finished';
     } else {
       status = 'upcoming';
@@ -1991,9 +2002,14 @@ const syncMatchesCore = async () => {
           needsUpdate = true;
         }
 
+        // Do NOT downgrade an already finished match back to live or upcoming due to CDN-cached eventsday response
         if (status !== existingMatch.status) {
-          updateFields.status = status;
-          needsUpdate = true;
+          if (existingMatch.status === 'finished' && (status === 'live' || status === 'upcoming')) {
+            // Keep finished status, do not revive stale eventsday cache
+          } else {
+            updateFields.status = status;
+            needsUpdate = true;
+          }
         }
         if (newHomeScore !== null && newHomeScore !== existingMatch.homeScore) {
           updateFields.homeScore = newHomeScore;
