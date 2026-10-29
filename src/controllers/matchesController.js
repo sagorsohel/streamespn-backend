@@ -1635,17 +1635,17 @@ const autoExpireStaleLiveAndUpcomingMatchesCore = async () => {
       `);
       const expiredUpcomingCount = upcomingResult?.affectedRows || 0;
 
-      // 3. Clean up obsolete finished matches (> 48 hours ago) that are strictly NOT customized
+      // 3. Clean up obsolete finished matches (> 5 days ago = 120 hours) that are strictly NOT customized
       const [cleanResult] = await connection.query(`
         DELETE FROM \`matches\`
         WHERE \`status\` = 'finished'
           AND \`is_customized\` = 0
-          AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 48 HOUR);
+          AND \`match_time\` <= DATE_SUB(NOW(), INTERVAL 5 DAY);
       `);
       const cleanedObsoleteCount = cleanResult?.affectedRows || 0;
 
       if (expiredLiveCount > 0 || expiredUpcomingCount > 0 || cleanedObsoleteCount > 0) {
-        console.log(`⏱️ [AUTO-EXPIRE] Successfully auto-expired ${expiredLiveCount} stale live matches, ${expiredUpcomingCount} past upcoming matches, cleaned ${cleanedObsoleteCount} obsolete matches (>48h).`);
+        console.log(`⏱️ [AUTO-EXPIRE] Successfully auto-expired ${expiredLiveCount} stale live matches, ${expiredUpcomingCount} past upcoming matches, cleaned ${cleanedObsoleteCount} obsolete matches (>5 days).`);
         clearMatchesCache();
       }
 
@@ -1663,23 +1663,22 @@ const autoExpireStaleLiveAndUpcomingMatchesCore = async () => {
   }
 };
 
-// Midnight 12:00 AM Automated Cleanup Function (with 11:00 PM cutoff rule)
+// Midnight 12:00 AM Automated Cleanup Function (5-Day Retention Policy)
+// Preserves matches in the database for 5 full days so direct match links stay accessible.
+// UI (home/categories) continues to only show Today & Tomorrow.
 const cleanupMidnightMatchesCore = async (midnightTime = new Date()) => {
   try {
     // 1. Auto-expire any stale live (>6h) or upcoming (>24h) matches first
     await autoExpireStaleLiveAndUpcomingMatchesCore();
 
-    // 11:00 PM cutoff: exactly 1 hour prior to 12:00 AM midnight
-    const cutoff11PM = new Date(midnightTime.getTime() - 60 * 60 * 1000);
+    // 5-Day Cutoff: Delete matches that took place 5 or more days ago (120 hours)
+    const cutoff5Days = new Date(midnightTime.getTime() - 5 * 24 * 60 * 60 * 1000);
 
     // Rule:
     // 1. Matches must be 'finished'
     // 2. Not customized by admin (isCustomized = false)
-    // 3. Finished on or before 11:00 PM:
-    //    - matches.updatedAt <= cutoff11PM
-    //    - OR matchTime started early enough to finish before 11 PM (matchTime <= cutoff11PM - 2.5 hours)
-    // 4. Matches that finished AFTER 11:00 PM (updatedAt > cutoff11PM) are strictly PRESERVED
-    //    and will only be removed during the next midnight's cleanup.
+    // 3. Match was scheduled 5 or more days ago (matchTime <= cutoff5Days)
+    // 4. Matches within the 5-day window are preserved so direct links remain accessible.
     // 5. 'live' or 'upcoming' matches are NEVER deleted.
     const res = await db
       .delete(matches)
@@ -1687,16 +1686,14 @@ const cleanupMidnightMatchesCore = async (midnightTime = new Date()) => {
         and(
           eq(matches.status, 'finished'),
           eq(matches.isCustomized, false),
-          or(
-            lte(matches.updatedAt, cutoff11PM),
-            lte(matches.matchTime, new Date(cutoff11PM.getTime() - 2.5 * 3600 * 1000))
-          )
+          lte(matches.matchTime, cutoff5Days)
         )
       );
 
     const deletedCount = res[0]?.affectedRows || 0;
     if (deletedCount > 0) {
-      console.log(`🧹 [MIDNIGHT CLEANUP] Cleaned up ${deletedCount} finished matches ended on/before 11:00 PM (${cutoff11PM.toLocaleTimeString()}).`);
+      console.log(`🧹 [MIDNIGHT CLEANUP] Cleaned up ${deletedCount} finished matches older than 5 days (prior to ${cutoff5Days.toLocaleDateString()}).`);
+      clearMatchesCache();
     }
     return deletedCount;
   } catch (err) {
@@ -1724,11 +1721,10 @@ const syncMatchesCore = async () => {
     const startOfToday = new Date(now);
     startOfToday.setHours(0, 0, 0, 0);
 
-    // 🧹 Clean up only very old obsolete matches (older than 48 hours and finished)
-    // Note: Today's and yesterday's matches are handled safely by the midnight 11 PM cutoff scheduler!
+    // 🧹 Clean up only matches older than 5 days (120 hours) so matches remain accessible via direct URL for 5 days
     let deletedCount = 0;
     try {
-      const obsoleteThreshold = new Date(now.getTime() - 48 * 3600 * 1000);
+      const obsoleteThreshold = new Date(now.getTime() - 5 * 24 * 3600 * 1000);
       const deleteRes = await db
         .delete(matches)
         .where(
