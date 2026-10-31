@@ -435,8 +435,9 @@ const getMatches = async (req, res, next) => {
         const words = searchTerm.split(/\s+/).filter((w) => w.length >= 2);
         const allGrams = [];
         words.forEach((w) => allGrams.push(...getGrams(w)));
-        const uniqueGrams = Array.from(new Set(allGrams)).slice(0, 10);
+        const uniqueGrams = Array.from(new Set(allGrams)).slice(0, 12);
 
+        const textConditions = [];
         if (uniqueGrams.length > 0) {
           const gramConditions = uniqueGrams.map((g) => {
             const pat = `%${g.toLowerCase()}%`;
@@ -447,14 +448,30 @@ const getMatches = async (req, res, next) => {
               sql`LOWER(${sportsSubcategories.name}) LIKE ${pat}`
             );
           });
-          fallbackConditions.push(or(...gramConditions));
+          textConditions.push(...gramConditions);
+        }
+
+        // Add SOUNDEX condition for phonetic word matching (e.g. cerlus -> carlos)
+        for (const w of words) {
+          if (w.length >= 3) {
+            textConditions.push(
+              sql`SOUNDEX(SUBSTRING_INDEX(${matches.homeTeam}, ' ', 1)) = SOUNDEX(${w})`,
+              sql`SOUNDEX(SUBSTRING_INDEX(${matches.awayTeam}, ' ', 1)) = SOUNDEX(${w})`,
+              sql`SOUNDEX(SUBSTRING_INDEX(${matches.homeTeam}, ' ', -1)) = SOUNDEX(${w})`,
+              sql`SOUNDEX(SUBSTRING_INDEX(${matches.awayTeam}, ' ', -1)) = SOUNDEX(${w})`
+            );
+          }
+        }
+
+        if (textConditions.length > 0) {
+          fallbackConditions.push(or(...textConditions));
         }
 
         if (fallbackConditions.length > 0) {
           fallbackQuery = fallbackQuery.where(and(...fallbackConditions));
         }
 
-        fallbackQuery = fallbackQuery.orderBy(statusOrder, asc(matches.matchTime)).limit(250);
+        fallbackQuery = fallbackQuery.orderBy(desc(matches.isCustomized), statusOrder, asc(matches.matchTime)).limit(250);
         const fallbackRows = await fallbackQuery;
         const candidateMatches = fallbackRows.map((m) => ({
           ...m,
