@@ -3,6 +3,7 @@ const axios = require('axios');
 const { db, pool, ensureDatabaseExists } = require('../db');
 const { matches, sportsCategories, sportsSubcategories } = require('../db/schema');
 const { SPORTSDB_API_KEY } = require('../services/sportsDbService');
+const { fuzzyFilterAndRank, getGrams } = require('../utils/fuzzySearch');
 
 // Helper to generate clean URL slug
 const slugify = (text) => {
@@ -233,17 +234,17 @@ const getMatches = async (req, res, next) => {
     }
 
     // Search query filter (matches home team, away team, title, category, or subcategory)
+    let searchCondition = null;
     if (searchTerm) {
       const searchPattern = `%${searchTerm.toLowerCase()}%`;
-      conditions.push(
-        or(
-          sql`LOWER(${matches.homeTeam}) LIKE ${searchPattern}`,
-          sql`LOWER(${matches.awayTeam}) LIKE ${searchPattern}`,
-          sql`LOWER(${matches.title}) LIKE ${searchPattern}`,
-          sql`LOWER(${sportsCategories.sportName}) LIKE ${searchPattern}`,
-          sql`LOWER(${sportsSubcategories.name}) LIKE ${searchPattern}`
-        )
+      searchCondition = or(
+        sql`LOWER(${matches.homeTeam}) LIKE ${searchPattern}`,
+        sql`LOWER(${matches.awayTeam}) LIKE ${searchPattern}`,
+        sql`LOWER(${matches.title}) LIKE ${searchPattern}`,
+        sql`LOWER(${sportsCategories.sportName}) LIKE ${searchPattern}`,
+        sql`LOWER(${sportsSubcategories.name}) LIKE ${searchPattern}`
       );
+      conditions.push(searchCondition);
     }
 
     if (filterTab === 'live') {
@@ -380,11 +381,95 @@ const getMatches = async (req, res, next) => {
     }
 
     const rawResults = await query;
-    const results = rawResults.map((m) => ({
+    let results = rawResults.map((m) => ({
       ...m,
       homeScore: m.homeScore === 'null' || m.homeScore === 'undefined' ? null : m.homeScore,
       awayScore: m.awayScore === 'null' || m.awayScore === 'undefined' ? null : m.awayScore,
     }));
+
+    // If exact SQL search returned no matches and search term was given, perform typo-tolerant fuzzy fallback
+    if (searchTerm && results.length === 0 && searchCondition) {
+      try {
+        const fallbackConditions = conditions.filter((c) => c !== searchCondition);
+        let fallbackQuery = db
+          .select({
+            id: matches.id,
+            sportsdbEventId: matches.sportsdbEventId,
+            categoryId: matches.categoryId,
+            subcategoryId: matches.subcategoryId,
+            matchType: matches.matchType,
+            slug: matches.slug,
+            title: matches.title,
+            homeTeam: matches.homeTeam,
+            homeTeamLogo: matches.homeTeamLogo,
+            awayTeam: matches.awayTeam,
+            awayTeamLogo: matches.awayTeamLogo,
+            homeScore: matches.homeScore,
+            awayScore: matches.awayScore,
+            livePeriod: matches.livePeriod,
+            liveMinute: matches.liveMinute,
+            matchTime: matches.matchTime,
+            status: matches.status,
+            venue: matches.venue,
+            playerImage: matches.playerImage,
+            bgImage: matches.bgImage,
+            referralLink: matches.referralLink,
+            displayOrder: matches.displayOrder,
+            isCustomized: matches.isCustomized,
+            createdAt: matches.createdAt,
+            updatedAt: matches.updatedAt,
+            categoryName: sportsCategories.sportName,
+            categoryLogo: sportsCategories.iconUrl,
+            categoryPlayerImage: sportsCategories.playerImage,
+            categoryBgImage: sportsCategories.bgImage,
+            categoryThumbUrl: sportsCategories.thumbUrl,
+            categoryReferralLink: sportsCategories.referralLink,
+            subcategoryName: sportsSubcategories.name,
+            subcategoryLogo: sportsSubcategories.logoUrl,
+            subcategoryReferralLink: sportsSubcategories.referralLink,
+          })
+          .from(matches)
+          .leftJoin(sportsCategories, eq(matches.categoryId, sportsCategories.id))
+          .leftJoin(sportsSubcategories, eq(matches.subcategoryId, sportsSubcategories.id));
+
+        const words = searchTerm.split(/\s+/).filter((w) => w.length >= 2);
+        const allGrams = [];
+        words.forEach((w) => allGrams.push(...getGrams(w)));
+        const uniqueGrams = Array.from(new Set(allGrams)).slice(0, 10);
+
+        if (uniqueGrams.length > 0) {
+          const gramConditions = uniqueGrams.map((g) => {
+            const pat = `%${g.toLowerCase()}%`;
+            return or(
+              sql`LOWER(${matches.homeTeam}) LIKE ${pat}`,
+              sql`LOWER(${matches.awayTeam}) LIKE ${pat}`,
+              sql`LOWER(${matches.title}) LIKE ${pat}`,
+              sql`LOWER(${sportsSubcategories.name}) LIKE ${pat}`
+            );
+          });
+          fallbackConditions.push(or(...gramConditions));
+        }
+
+        if (fallbackConditions.length > 0) {
+          fallbackQuery = fallbackQuery.where(and(...fallbackConditions));
+        }
+
+        fallbackQuery = fallbackQuery.orderBy(statusOrder, asc(matches.matchTime)).limit(250);
+        const fallbackRows = await fallbackQuery;
+        const candidateMatches = fallbackRows.map((m) => ({
+          ...m,
+          homeScore: m.homeScore === 'null' || m.homeScore === 'undefined' ? null : m.homeScore,
+          awayScore: m.awayScore === 'null' || m.awayScore === 'undefined' ? null : m.awayScore,
+        }));
+
+        const fuzzyMatches = fuzzyFilterAndRank(candidateMatches, searchTerm);
+        if (fuzzyMatches.length > 0) {
+          results = limitNum ? fuzzyMatches.slice(0, limitNum) : fuzzyMatches;
+        }
+      } catch (err) {
+        console.error('Error during fallback fuzzy search:', err);
+      }
+    }
 
     if (isPublicPage1) {
       matchesCacheMap.set(cacheKey, { timestamp: Date.now(), data: results });
