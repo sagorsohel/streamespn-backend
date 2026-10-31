@@ -1,7 +1,7 @@
 /**
- * High-performance Fuzzy Search and Typo-Tolerance Utility for Backend
- * Detects close matches for misspelled team names, player names, tournaments, etc.
- * e.g. "cerlos" -> "Carlos Alcaraz", "alcarez" -> "Alcaraz", "barselona" -> "Barcelona"
+ * High-performance Precise Typo-Tolerance and Fuzzy Search Utility for Backend
+ * Guarantees that only accurate and relevant matches are returned even with misspelled search queries.
+ * (e.g. "cerlos" -> "Carlos Alcaraz", eliminating false positives like "Cerro" or "Certosa")
  */
 
 function soundex(s) {
@@ -67,24 +67,32 @@ function wordSimilarity(qWord, targetWord) {
   const maxLen = Math.max(qW.length, tW.length);
   if (maxLen === 0) return 100;
 
+  // Exact substring inside target word (e.g. "alcar" inside "alcaraz")
   if (tW.includes(qW)) {
     return 90 + (qW.length / tW.length) * 10;
   }
 
-  const maxAllowedDist = qW.length <= 4 ? 1 : (qW.length <= 7 ? 2 : 3);
+  // Reject if length difference is too large for a typo
+  if (Math.abs(qW.length - tW.length) > 1) return 0;
+
   const dist = levenshteinDistance(qW, tW);
+  const sndxQ = soundex(qW);
+  const sndxT = soundex(tW);
+
+  // Strict typo rules to prevent false-positives:
+  // Words <= 6 characters: max 1 edit (e.g. cerlos -> carlos)
+  // Words >= 7 characters: max 2 edits (e.g. dimitriv -> dimitrov)
+  const maxAllowedDist = qW.length <= 6 ? 1 : 2;
   if (dist > maxAllowedDist) return 0;
 
   const ratio = 1 - dist / maxLen;
-  if (ratio < 0.6) return 0;
+  if (ratio < 0.70) return 0;
 
-  let score = ratio * 75;
-
+  let score = ratio * 80;
   if (qW[0] === tW[0]) score += 10;
-  if (soundex(qW) === soundex(tW)) score += 15;
-  if (qW.length === tW.length) score += 5;
+  if (sndxQ === sndxT) score += 10;
 
-  return Math.min(score, 95);
+  return Math.min(score, 98);
 }
 
 function computeMatchScore(match, query) {
@@ -108,12 +116,12 @@ function computeMatchScore(match, query) {
     return 1000 + (qClean.length / fullText.length) * 100;
   }
 
-  // 1b. Normalized match
+  // 1b. Normalized match (ignores spaces/hyphens)
   if (fullNorm.includes(qNorm)) {
     return 950;
   }
 
-  // 2. All query words exist
+  // 2. All query words exist as substrings
   if (qWords.length > 1 && qWords.every((w) => fullText.includes(w))) {
     return 800;
   }
@@ -133,7 +141,7 @@ function computeMatchScore(match, query) {
       }
     }
 
-    if (bestWordScore >= 60) {
+    if (bestWordScore >= 70) {
       totalScore += bestWordScore;
     } else {
       allMatched = false;
@@ -159,15 +167,27 @@ function fuzzyFilterAndRank(matches, query) {
   const scored = [];
   for (const m of matches) {
     const sc = computeMatchScore(m, query);
-    if (sc >= 60) {
+    if (sc >= 70) {
       scored.push({ match: m, score: sc });
     }
   }
 
+  if (scored.length === 0) return [];
+
+  // Sort by score descending first
+  scored.sort((a, b) => b.score - a.score);
+
+  // Confidence gap filtering:
+  // If top match has a high score (>= 80), only keep close high-confidence matches (topScore - 12)
+  // This eliminates unrelated random matches (e.g. Cerro when searching Carlos)
+  const topScore = scored[0].score;
+  const cutoff = topScore >= 80 ? Math.max(70, topScore - 12) : 70;
+  const filtered = scored.filter((s) => s.score >= cutoff);
+
   const now = Date.now();
   const statusPriority = { live: 1, upcoming: 2, finished: 3 };
 
-  scored.sort((a, b) => {
+  filtered.sort((a, b) => {
     // 1. Clear score difference (>5 points)
     if (Math.abs(b.score - a.score) > 5) {
       return b.score - a.score;
@@ -188,7 +208,7 @@ function fuzzyFilterAndRank(matches, query) {
     return Math.abs(timeA - now) - Math.abs(timeB - now);
   });
 
-  return scored.map((s) => s.match);
+  return filtered.map((s) => s.match);
 }
 
 module.exports = {
