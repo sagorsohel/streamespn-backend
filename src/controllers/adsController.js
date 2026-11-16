@@ -33,6 +33,18 @@ const ensureTableExists = async () => {
     // column might already exist
   }
 
+  // Ensure per-placement ON/OFF columns exist
+  for (const col of ['is_nav_ads_enabled', 'is_modal_signup_ads_enabled', 'is_footer_ads_enabled']) {
+    try {
+      const [cols] = await connection.query(`SHOW COLUMNS FROM \`ads_settings\` LIKE '${col}';`);
+      if (cols.length === 0) {
+        await connection.query(`ALTER TABLE \`ads_settings\` ADD COLUMN \`${col}\` TINYINT(1) NOT NULL DEFAULT 1;`);
+      }
+    } catch (e) {
+      // column might already exist
+    }
+  }
+
   // Ensure column header_scripts exists
   try {
     const [cols] = await connection.query(`SHOW COLUMNS FROM \`ads_settings\` LIKE 'header_scripts';`);
@@ -98,9 +110,24 @@ const formatAdsSettings = (settings) => {
 
   return {
     ...settings,
+    isNavAdsEnabled: settings.isNavAdsEnabled !== undefined ? Boolean(settings.isNavAdsEnabled) : true,
+    isModalSignupAdsEnabled: settings.isModalSignupAdsEnabled !== undefined ? Boolean(settings.isModalSignupAdsEnabled) : true,
+    isFooterAdsEnabled: settings.isFooterAdsEnabled !== undefined ? Boolean(settings.isFooterAdsEnabled) : true,
     headAds: combinedHeadAds || settings.headAds || '',
     isHeadAdsEnabled: activeScripts.length > 0,
     headerScripts,
+  };
+};
+
+// Public (website) view: ad code of a placement that is switched OFF is blanked out,
+// so the website never receives or renders it.
+const toPublicSettings = (settings) => {
+  const s = formatAdsSettings(settings);
+  return {
+    ...s,
+    navAds: s.isNavAdsEnabled ? s.navAds || '' : '',
+    modalSignupAds: s.isModalSignupAdsEnabled ? s.modalSignupAds || '' : '',
+    footerAds: s.isFooterAdsEnabled ? s.footerAds || '' : '',
   };
 };
 
@@ -150,7 +177,7 @@ const getAdsFast = (req, res) => {
   return res.status(200).json({
     success: true,
     data: {
-      settings: cachedAdsSettings ? formatAdsSettings(cachedAdsSettings) : defaultSettings,
+      settings: cachedAdsSettings ? toPublicSettings(cachedAdsSettings) : defaultSettings,
     },
   });
 };
@@ -228,8 +255,11 @@ const updateAdsSettings = async (req, res, next) => {
       isHeadAdsEnabled,
       headerScripts,
       navAds,
+      isNavAdsEnabled,
       modalSignupAds,
+      isModalSignupAdsEnabled,
       footerAds,
+      isFooterAdsEnabled,
       floatMobileAds,
       floatDesktopAds,
       histatsScript,
@@ -266,6 +296,10 @@ const updateAdsSettings = async (req, res, next) => {
       membershipReferralLink: membershipReferralLink !== undefined ? membershipReferralLink : '',
       globalSignInReferralLink: globalSignInReferralLink !== undefined ? globalSignInReferralLink : '',
     };
+
+    if (isNavAdsEnabled !== undefined) updatePayload.isNavAdsEnabled = Boolean(isNavAdsEnabled);
+    if (isModalSignupAdsEnabled !== undefined) updatePayload.isModalSignupAdsEnabled = Boolean(isModalSignupAdsEnabled);
+    if (isFooterAdsEnabled !== undefined) updatePayload.isFooterAdsEnabled = Boolean(isFooterAdsEnabled);
 
     if (headAds !== undefined) {
       updatePayload.headAds = headAds;
