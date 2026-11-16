@@ -81,6 +81,8 @@ const adsSettings = mysqlTable('ads_settings', {
   isModalSignupAdsEnabled: boolean('is_modal_signup_ads_enabled').default(true).notNull(),
   footerAds: text('footer_ads'),
   isFooterAdsEnabled: boolean('is_footer_ads_enabled').default(true).notNull(),
+  matchListAds: text('match_list_ads'),
+  isMatchListAdsEnabled: boolean('is_match_list_ads_enabled').default(true).notNull(),
   floatMobileAds: text('float_mobile_ads'),
   floatDesktopAds: text('float_desktop_ads'),
   histatsScript: text('histats_script'),

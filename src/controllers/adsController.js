@@ -33,8 +33,18 @@ const ensureTableExists = async () => {
     // column might already exist
   }
 
+  // Ensure match_list_ads (above match cards) text column exists
+  try {
+    const [cols] = await connection.query(`SHOW COLUMNS FROM \`ads_settings\` LIKE 'match_list_ads';`);
+    if (cols.length === 0) {
+      await connection.query(`ALTER TABLE \`ads_settings\` ADD COLUMN \`match_list_ads\` TEXT;`);
+    }
+  } catch (e) {
+    // column might already exist
+  }
+
   // Ensure per-placement ON/OFF columns exist
-  for (const col of ['is_nav_ads_enabled', 'is_modal_signup_ads_enabled', 'is_footer_ads_enabled']) {
+  for (const col of ['is_nav_ads_enabled', 'is_modal_signup_ads_enabled', 'is_footer_ads_enabled', 'is_match_list_ads_enabled']) {
     try {
       const [cols] = await connection.query(`SHOW COLUMNS FROM \`ads_settings\` LIKE '${col}';`);
       if (cols.length === 0) {
@@ -113,6 +123,7 @@ const formatAdsSettings = (settings) => {
     isNavAdsEnabled: settings.isNavAdsEnabled !== undefined ? Boolean(settings.isNavAdsEnabled) : true,
     isModalSignupAdsEnabled: settings.isModalSignupAdsEnabled !== undefined ? Boolean(settings.isModalSignupAdsEnabled) : true,
     isFooterAdsEnabled: settings.isFooterAdsEnabled !== undefined ? Boolean(settings.isFooterAdsEnabled) : true,
+    isMatchListAdsEnabled: settings.isMatchListAdsEnabled !== undefined ? Boolean(settings.isMatchListAdsEnabled) : true,
     headAds: combinedHeadAds || settings.headAds || '',
     isHeadAdsEnabled: activeScripts.length > 0,
     headerScripts,
@@ -128,6 +139,7 @@ const toPublicSettings = (settings) => {
     navAds: s.isNavAdsEnabled ? s.navAds || '' : '',
     modalSignupAds: s.isModalSignupAdsEnabled ? s.modalSignupAds || '' : '',
     footerAds: s.isFooterAdsEnabled ? s.footerAds || '' : '',
+    matchListAds: s.isMatchListAdsEnabled ? s.matchListAds || '' : '',
   };
 };
 
@@ -260,6 +272,8 @@ const updateAdsSettings = async (req, res, next) => {
       isModalSignupAdsEnabled,
       footerAds,
       isFooterAdsEnabled,
+      matchListAds,
+      isMatchListAdsEnabled,
       floatMobileAds,
       floatDesktopAds,
       histatsScript,
@@ -297,6 +311,8 @@ const updateAdsSettings = async (req, res, next) => {
       globalSignInReferralLink: globalSignInReferralLink !== undefined ? globalSignInReferralLink : '',
     };
 
+    if (matchListAds !== undefined) updatePayload.matchListAds = matchListAds;
+    if (isMatchListAdsEnabled !== undefined) updatePayload.isMatchListAdsEnabled = Boolean(isMatchListAdsEnabled);
     if (isNavAdsEnabled !== undefined) updatePayload.isNavAdsEnabled = Boolean(isNavAdsEnabled);
     if (isModalSignupAdsEnabled !== undefined) updatePayload.isModalSignupAdsEnabled = Boolean(isModalSignupAdsEnabled);
     if (isFooterAdsEnabled !== undefined) updatePayload.isFooterAdsEnabled = Boolean(isFooterAdsEnabled);
