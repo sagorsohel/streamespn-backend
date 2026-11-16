@@ -44,7 +44,7 @@ const ensureTableExists = async () => {
   }
 
   // Ensure per-placement ON/OFF columns exist
-  for (const col of ['is_nav_ads_enabled', 'is_modal_signup_ads_enabled', 'is_footer_ads_enabled', 'is_match_list_ads_enabled']) {
+  for (const col of ['is_nav_ads_enabled', 'is_modal_signup_ads_enabled', 'is_footer_ads_enabled', 'is_match_list_ads_enabled', 'is_top_google_ad_enabled']) {
     try {
       const [cols] = await connection.query(`SHOW COLUMNS FROM \`ads_settings\` LIKE '${col}';`);
       if (cols.length === 0) {
@@ -124,6 +124,7 @@ const formatAdsSettings = (settings) => {
     isModalSignupAdsEnabled: settings.isModalSignupAdsEnabled !== undefined ? Boolean(settings.isModalSignupAdsEnabled) : true,
     isFooterAdsEnabled: settings.isFooterAdsEnabled !== undefined ? Boolean(settings.isFooterAdsEnabled) : true,
     isMatchListAdsEnabled: settings.isMatchListAdsEnabled !== undefined ? Boolean(settings.isMatchListAdsEnabled) : true,
+    isTopGoogleAdEnabled: settings.isTopGoogleAdEnabled !== undefined ? Boolean(settings.isTopGoogleAdEnabled) : true,
     headAds: combinedHeadAds || settings.headAds || '',
     isHeadAdsEnabled: activeScripts.length > 0,
     headerScripts,
@@ -274,6 +275,7 @@ const updateAdsSettings = async (req, res, next) => {
       isFooterAdsEnabled,
       matchListAds,
       isMatchListAdsEnabled,
+      isTopGoogleAdEnabled,
       floatMobileAds,
       floatDesktopAds,
       histatsScript,
@@ -311,6 +313,7 @@ const updateAdsSettings = async (req, res, next) => {
       globalSignInReferralLink: globalSignInReferralLink !== undefined ? globalSignInReferralLink : '',
     };
 
+    if (isTopGoogleAdEnabled !== undefined) updatePayload.isTopGoogleAdEnabled = Boolean(isTopGoogleAdEnabled);
     if (matchListAds !== undefined) updatePayload.matchListAds = matchListAds;
     if (isMatchListAdsEnabled !== undefined) updatePayload.isMatchListAdsEnabled = Boolean(isMatchListAdsEnabled);
     if (isNavAdsEnabled !== undefined) updatePayload.isNavAdsEnabled = Boolean(isNavAdsEnabled);
